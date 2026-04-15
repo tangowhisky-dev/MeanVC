@@ -1,22 +1,31 @@
 # Codebase Map
 
-Generated: 2026-04-15T19:59:22Z | Files: 58 | Described: 0/58
-<!-- gsd:codebase-meta {"generatedAt":"2026-04-15T19:59:22Z","fingerprint":"d02d3dc2ab0fb8f53d93fd890c8fa73734dbe998","fileCount":58,"truncated":false} -->
+Generated: 2026-04-15T21:57:59Z | Files: 76 | Described: 0/76
+<!-- gsd:codebase-meta {"generatedAt":"2026-04-15T21:57:59Z","fingerprint":"d1dc61f76766892e0cdbbf10ffaa02c8fa5f0792","fileCount":76,"truncated":false} -->
 
 ### (root)/
+- `.DS_Store`
 - `.gitignore`
+- `convert.py`
 - `default_config.yaml`
 - `defaults.ini`
 - `download_ckpt.py`
 - `LICENSE`
+- `MPS_COMPATIBILITY_ANALYSIS.md`
 - `README.md`
 - `requirements.txt`
+
+### meanvc_out/
+- `meanvc_out/anchor_converted.wav`
 
 ### scripts/
 - `scripts/infer_ref.sh`
 - `scripts/infer.sh`
 - `scripts/train_dis.sh`
 - `scripts/train.sh`
+
+### src/
+- `src/.DS_Store`
 
 ### src/config/
 - `src/config/config_160ms.json`
@@ -63,12 +72,14 @@ Generated: 2026-04-15T19:59:22Z | Files: 58 | Described: 0/58
 - `src/preprocess/models/utils.py`
 
 ### src/runtime/
+- `src/runtime/.DS_Store`
 - `src/runtime/run_rt.py`
 
 ### src/runtime/example/
 - `src/runtime/example/test.wav`
 
 ### src/runtime/speaker_verification/
+- `src/runtime/speaker_verification/.DS_Store`
 - `src/runtime/speaker_verification/ecapa_tdnn.py`
 - `src/runtime/speaker_verification/utils.py`
 - `src/runtime/speaker_verification/verification.py`
@@ -76,6 +87,31 @@ Generated: 2026-04-15T19:59:22Z | Files: 58 | Described: 0/58
 ### src/train/
 - `src/train/train_2.py`
 - `src/train/train.py`
+
+### src/utils/
+- `src/utils/__init__.py`
+- `src/utils/audio.py`
+
+### src/wavLM/
+- `src/wavLM/modules.py`
+- `src/wavLM/WavLM.py`
+
+### test_data/
+- `test_data/train.list`
+
+### test_data/bn/
+- `test_data/bn/test.npy`
+
+### test_data/mel/
+- `test_data/mel/test.npy`
+
+### test_data/xvector/
+- `test_data/xvector/test.npy`
+
+### tests/
+- `tests/simple_train_test.py`
+- `tests/test1.py`
+- `tests/train_test.py`
 
 ### vocos/
 - `vocos/__init__.py`

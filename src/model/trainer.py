@@ -175,21 +175,14 @@ class Trainer:
             ] = batch_size
 
         self.get_dataloader()
-        print(
-            f"[DEBUG] After get_dataloader, dataloader length: {len(self.train_dataloader)}"
-        )
         self.get_scheduler()
-        print(f"[DEBUG] After get_scheduler")
         self.start_step = self.load_checkpoint()
-        print(f"[DEBUG] After load_checkpoint, start_step={self.start_step}")
 
-        print("[DEBUG] Calling accelerator.prepare...")
         self.model, self.optimizer, self.scheduler, self.train_dataloader = (
             self.accelerator.prepare(
                 self.model, self.optimizer, self.scheduler, self.train_dataloader
             )
         )
-        print("[DEBUG] After prepare")
 
     def get_scheduler(self):
         warmup_steps = self.num_warmup_updates * self.accelerator.num_processes
@@ -263,17 +256,23 @@ class Trainer:
                 )
 
     def load_checkpoint(self):
-        print(f"[DEBUG] load_checkpoint called, checkpoint_path={self.checkpoint_path}")
         if (
             not exists(self.checkpoint_path)
             or not os.path.exists(self.checkpoint_path)
             or not os.listdir(self.checkpoint_path)
         ):
-            print("[DEBUG] No checkpoint found, returning 0")
             return 0
 
-        print(
-            f"[DEBUG] Checkpoint directory exists, files: {os.listdir(self.checkpoint_path)}"
+        self.accelerator.wait_for_everyone()
+        if "model_last.pt" in os.listdir(self.checkpoint_path):
+            latest_checkpoint = "model_last.pt"
+        else:
+            latest_checkpoint = sorted(
+                [f for f in os.listdir(self.checkpoint_path) if f.endswith(".pt")],
+                key=lambda x: int("".join(filter(str.isdigit, x))),
+            )[-1]
+        checkpoint = torch.load(
+            f"{self.checkpoint_path}/{latest_checkpoint}", map_location="cpu"
         )
         self.accelerator.wait_for_everyone()
         if "model_last.pt" in os.listdir(self.checkpoint_path):
