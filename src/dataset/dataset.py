@@ -10,9 +10,9 @@ import time
 
 MAX_INT = sys.maxsize
 
-torch.multiprocessing.set_start_method('spawn', force=True)
-torch.multiprocessing.current_process().authkey = b'my_authkey'
-
+# Note: do NOT call set_start_method here — module-level side effects break
+# MPS and interfere with accelerate's DataLoaderShard on macOS.
+# num_workers=0 (single-process) is the correct mode for MPS training.
 
 
 class DiffusionDataset(torch.utils.data.Dataset):

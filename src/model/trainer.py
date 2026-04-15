@@ -61,18 +61,38 @@ class Trainer:
 
         self.device = get_device(device)
 
+        is_mps = str(self.device) == "mps"
+        if is_mps:
+            os.environ["TORCH_ALLOW_TF32_CUBLAS_OVERRIDE"] = "0"
+            os.environ["TORCH_CUDNN_V8_API_ENABLED"] = "0"
+
         ddp_kwargs = DistributedDataParallelKwargs(
             find_unused_parameters=False,
         )
 
         logger = "wandb" if wandb.api.api_key else None
         print(f"Using logger: {logger}")
-        self.accelerator = Accelerator(
-            log_with=logger,
-            kwargs_handlers=[ddp_kwargs],
-            gradient_accumulation_steps=grad_accumulation_steps,
-            **accelerate_kwargs,
-        )
+
+        mixed_precision = "no"
+        if not is_mps and torch.cuda.is_available():
+            mixed_precision = "fp16"
+
+        # For MPS, don't use DDP as gloo/nccl don't work with MPS
+        # Just use single GPU training
+        if is_mps:
+            self.accelerator = Accelerator(
+                log_with=logger,
+                gradient_accumulation_steps=grad_accumulation_steps,
+                mixed_precision=mixed_precision,
+            )
+        else:
+            self.accelerator = Accelerator(
+                log_with=logger,
+                kwargs_handlers=[ddp_kwargs],
+                gradient_accumulation_steps=grad_accumulation_steps,
+                mixed_precision=mixed_precision,
+                **accelerate_kwargs,
+            )
 
         if self.device is None:
             self.device = self.accelerator.device
@@ -124,10 +144,7 @@ class Trainer:
 
         if self.is_main:
             self.ema_model = EMA(model, include_online_model=False, **ema_kwargs)
-
-            self.ema_model.to(self.accelerator.device)
-            if self.accelerator.state.distributed_type in ["DEEPSPEED", "FSDP"]:
-                self.ema_model.half()
+            self.ema_model.to(self.device)
 
         self.epochs = epochs
         self.num_warmup_updates = num_warmup_updates
@@ -158,15 +175,21 @@ class Trainer:
             ] = batch_size
 
         self.get_dataloader()
+        print(
+            f"[DEBUG] After get_dataloader, dataloader length: {len(self.train_dataloader)}"
+        )
         self.get_scheduler()
+        print(f"[DEBUG] After get_scheduler")
         self.start_step = self.load_checkpoint()
-        # self.get_constant_scheduler()
+        print(f"[DEBUG] After load_checkpoint, start_step={self.start_step}")
 
+        print("[DEBUG] Calling accelerator.prepare...")
         self.model, self.optimizer, self.scheduler, self.train_dataloader = (
             self.accelerator.prepare(
                 self.model, self.optimizer, self.scheduler, self.train_dataloader
             )
         )
+        print("[DEBUG] After prepare")
 
     def get_scheduler(self):
         warmup_steps = self.num_warmup_updates * self.accelerator.num_processes
@@ -196,9 +219,9 @@ class Trainer:
 
     def get_dataloader(self):
         dd = DiffusionDataset(
-            *DiffusionDataset.init_data(self.args.dataset_path),
-            feature_list=self.args.feature_list,
-            additional_feature_list=self.args.additional_feature_list,
+            DiffusionDataset.init_data(self.args.dataset_path),
+            feature_list=self.args.feature_list.split() if isinstance(self.args.feature_list, str) else self.args.feature_list,
+            additional_feature_list=self.args.additional_feature_list.split() if isinstance(self.args.additional_feature_list, str) else self.args.additional_feature_list,
             feature_pad_values=self.args.feature_pad_values,
             max_len=self.args.max_len,
         )
@@ -208,9 +231,9 @@ class Trainer:
             batch_size=self.args.batch_size,
             shuffle=True,
             num_workers=self.args.num_workers,
-            pin_memory=True,
+            pin_memory=False,
             collate_fn=dd.custom_collate_fn,
-            persistent_workers=self.args.num_workers > 0,
+            persistent_workers=False,
         )
 
     @property
@@ -240,13 +263,18 @@ class Trainer:
                 )
 
     def load_checkpoint(self):
+        print(f"[DEBUG] load_checkpoint called, checkpoint_path={self.checkpoint_path}")
         if (
             not exists(self.checkpoint_path)
             or not os.path.exists(self.checkpoint_path)
             or not os.listdir(self.checkpoint_path)
         ):
+            print("[DEBUG] No checkpoint found, returning 0")
             return 0
 
+        print(
+            f"[DEBUG] Checkpoint directory exists, files: {os.listdir(self.checkpoint_path)}"
+        )
         self.accelerator.wait_for_everyone()
         if "model_last.pt" in os.listdir(self.checkpoint_path):
             latest_checkpoint = "model_last.pt"
@@ -256,7 +284,9 @@ class Trainer:
                 key=lambda x: int("".join(filter(str.isdigit, x))),
             )[-1]
         checkpoint = torch.load(
-            f"{self.checkpoint_path}/{latest_checkpoint}", map_location="cpu"
+            f"{self.checkpoint_path}/{latest_checkpoint}",
+            map_location="cpu",
+            weights_only=True,
         )
 
         if self.is_main:
@@ -477,45 +507,45 @@ class Trainer:
 
         self.model.train()
 
-        if resumable_with_seed > 0:
+        if resumable_with_seed and resumable_with_seed > 0 and start_step > 0:
             orig_epoch_step = len(train_dataloader)
             skipped_epoch = int(start_step // orig_epoch_step)
             skipped_batch = start_step % orig_epoch_step
-            skipped_dataloader = self.accelerator.skip_first_batches(
+            active_dataloader = self.accelerator.skip_first_batches(
                 train_dataloader, num_batches=skipped_batch
             )
         else:
             skipped_epoch = 0
+            active_dataloader = train_dataloader
 
         print(self.device)
 
         for epoch in range(skipped_epoch, self.epochs):
             self.model.train()
-            if resumable_with_seed > 0 and epoch == skipped_epoch:
-                progress_bar = tqdm(
-                    skipped_dataloader,
-                    desc=f"Epoch {epoch + 1}/{self.epochs}",
-                    unit="step",
-                    disable=not self.accelerator.is_local_main_process,
-                    initial=skipped_batch,
-                    total=orig_epoch_step,
-                    smoothing=0.15,
-                )
-            else:
-                progress_bar = tqdm(
-                    train_dataloader,
-                    desc=f"Epoch {epoch + 1}/{self.epochs}",
-                    unit="step",
-                    disable=not self.accelerator.is_local_main_process,
-                    smoothing=0.15,
-                )
+            # Use active_dataloader only for the first (possibly skipped) epoch
+            epoch_dataloader = active_dataloader if epoch == skipped_epoch else train_dataloader
+            progress_bar = tqdm(
+                epoch_dataloader,
+                desc=f"Epoch {epoch + 1}/{self.epochs}",
+                unit="step",
+                disable=not self.accelerator.is_local_main_process,
+                smoothing=0.15,
+            )
+
             for batch in progress_bar:
                 with self.accelerator.accumulate(self.model):
                     features = {}
-                    for feature_name in (
-                        self.args.feature_list + self.args.additional_feature_list
-                    ):
-                        features[feature_name] = batch[feature_name]
+                    feature_names = (
+                        self.args.feature_list
+                        if isinstance(self.args.feature_list, list)
+                        else self.args.feature_list.split()
+                    ) + (
+                        self.args.additional_feature_list
+                        if isinstance(self.args.additional_feature_list, list)
+                        else self.args.additional_feature_list.split()
+                    )
+                    for feature_name in feature_names:
+                        features[feature_name] = batch[feature_name].to(self.device)
 
                     diff_loss, mse_val = self.meanflow.loss(
                         self.model,
