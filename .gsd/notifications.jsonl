@@ -1,0 +1,1 @@
+{"id":"8a461095-ee39-4da1-a463-924d73fd63bc","ts":"2026-04-15T19:12:32.815Z","severity":"warning","message":"[bootstrap] ensureDbOpen failed — no .gsd directory found","source":"workflow-logger","read":false}

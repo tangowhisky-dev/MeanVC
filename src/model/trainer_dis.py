@@ -1,6 +1,6 @@
 from __future__ import annotations
-
 import os
+
 import gc
 from tqdm import tqdm
 import wandb
@@ -291,7 +291,7 @@ class Trainer:
         prompt_dir = "/val/mels_10ms"
         
         # smos
-        sv_model = init_model('wavlm_large', '/test/smos/ckpt/wavlm_large_finetune.pth')
+        sv_model = init_model('wavlm_large', os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'assets', 'wavLM', 'wavlm_large_finetune.pth'))
         sv_model.eval()
         sv_model.to(self.model.device)
         ssmi_dict = {}

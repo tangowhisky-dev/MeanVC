@@ -1,7 +1,7 @@
 
-torch==2.5.1 
-torchvision==0.20.1 
-torchaudio==2.5.1
+torch 
+torchvision 
+torchaudio
 librosa
 einops
 x-transformers
@@ -14,9 +14,10 @@ accelerate
 matplotlib
 wandb
 ema_pytorch
-jiwer==3.1.0
+jiwer
 zhon
 zhconv
 funasr
 encodec
 prefigure
+gdown

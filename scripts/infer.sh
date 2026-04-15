@@ -1,8 +1,8 @@
 export PYTHONPATH=$PYTHONPATH:$PWD
 
-
-model_path=src/ckpt/model_200ms.safetensors
-vocoder_path=src/ckpt/vocos.pt
+# All checkpoints live in assets/ — run download_ckpt.py first to populate.
+model_path=assets/ckpt/model_200ms.safetensors
+vocoder_path=assets/ckpt/vocos.pt
 bn_path=path/to/bn/
 speaker_emb_path=path/to/speaker_emb.npy
 prompt_path=path/to/prompt_mel.npy
@@ -19,4 +19,4 @@ python3 src/infer/infer.py \
 --spk-emb-path ${speaker_emb_path} \
 --prompt-path ${prompt_path} \
 --chunk-size 20 \
---steps 2 
+--steps 2

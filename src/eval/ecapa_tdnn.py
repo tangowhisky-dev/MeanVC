@@ -1,14 +1,107 @@
-# part of the code is borrowed from https://github.com/lawlict/ECAPA-TDNN
+# ECAPA-TDNN Speaker Verification Model
+# Replaces s3prl torch.hub with HuggingFace transformers for feature extraction.
+# Part of the code is borrowed from https://github.com/lawlict/ECAPA-TDNN
 
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchaudio.transforms as trans
-# from .utils import UpstreamExpert
+
+# ── Feature extractor backends ──────────────────────────────────────────────
+
+# Map of feat_type → HuggingFace model repo ID (used when config_path is None)
+_TRANSFORMERS_BACKENDS = {
+    "wavlm_large":        "microsoft/wavlm-large",
+    "wavlm_base_plus":    "microsoft/wavlm-base-plus",
+    "hubert_large_ll60k": "facebook/hubert-large-ll60k",
+    "hubert_base":        "facebook/hubert-base-ls960",
+    "wav2vec2_xlsr":      "facebook/wav2vec2-xls-r-300m",
+    "wav2vec2_large":     "facebook/wav2vec2-large",
+    "unispeech_sat":      "microsoft/unispeech-large-1500h-cv",
+}
 
 
-''' Res2Conv1d + BatchNorm1d + ReLU
-'''
+class _TransformerFeatureExtractor:
+    """Wraps a HuggingFace transformer model to match the s3prl calling convention.
+
+    The s3prl interface expects::
+
+        features = model([wav1, wav2, ...])        # list of 1-D tensors
+        return features["hidden_states"]            # list/tuple of per-layer tensors
+
+    This wrapper provides the same API using ``transformers``.
+    """
+
+    def __init__(self, model_name_or_path: str):
+        from transformers import AutoModel, AutoFeatureExtractor
+        self.processor = AutoFeatureExtractor.from_pretrained(model_name_or_path)
+        self.model = AutoModel.from_pretrained(model_name_or_path, output_hidden_states=True)
+        self.model.eval()
+
+        # Expose encoder layers for fp32_attention checks (legacy s3prl compat)
+        self.encoder = self.model
+        # Most HF models expose layers via model.encoder.layers or model.layers
+        if hasattr(self.model, "encoder") and hasattr(self.model.encoder, "layers"):
+            self.encoder = self.model.encoder
+
+    def __call__(self, wavs: list[torch.Tensor]):
+        """Forward pass matching the s3prl signature."""
+        device = wavs[0].device
+        # HF processor expects numpy; convert each wav
+        all_hidden_states = []
+        for wav in wavs:
+            wav_np = wav.cpu().numpy()
+            inputs = self.processor(
+                wav_np,
+                sampling_rate=16000,
+                return_tensors="pt",
+                padding=True,
+            )
+            # Move input tensors to the original device
+            input_values = inputs["input_values"].to(device)
+            with torch.no_grad():
+                outputs = self.model(input_values)
+            # outputs.hidden_states: tuple of (embedding + N layer states)
+            # Skip the embedding layer (index 0), return only transformer layers
+            layer_states = outputs.hidden_states[1:]  # tuple of tensors
+            all_hidden_states.append(layer_states)
+
+        # If batch size == 1, return as s3prl does (single sample list)
+        if len(wavs) == 1:
+            return {"hidden_states": all_hidden_states[0]}
+
+        # Stack per-sample layer outputs: [num_layers, batch, time, dim]
+        num_layers = len(all_hidden_states[0])
+        stacked = []
+        for layer_idx in range(num_layers):
+            # Stack across samples: [batch, time, dim]
+            layer_tensor = torch.stack(
+                [all_hidden_states[s][layer_idx].squeeze(0) for s in range(len(wavs))],
+                dim=0,
+            )
+            stacked.append(layer_tensor)
+        return {"hidden_states": stacked}
+
+    def named_parameters(self):
+        return self.model.named_parameters()
+
+    def parameters(self):
+        return self.model.parameters()
+
+    def to(self, device):
+        self.model.to(device)
+        return self
+
+    def eval(self):
+        self.model.eval()
+        return self
+
+    def state_dict(self):
+        return self.model.state_dict()
+
+
+# ── ECAPA-TDNN architecture ─────────────────────────────────────────────────
 
 
 class Res2Conv1dReluBn(nn.Module):
@@ -50,10 +143,6 @@ class Res2Conv1dReluBn(nn.Module):
         return out
 
 
-''' Conv1d + BatchNorm1d + ReLU
-'''
-
-
 class Conv1dReluBn(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=1, stride=1, padding=0, dilation=1, bias=True):
         super().__init__()
@@ -62,10 +151,6 @@ class Conv1dReluBn(nn.Module):
 
     def forward(self, x):
         return self.bn(F.relu(self.conv(x)))
-
-
-''' The SE connection of 1D case.
-'''
 
 
 class SE_Connect(nn.Module):
@@ -81,19 +166,6 @@ class SE_Connect(nn.Module):
         out = x * out.unsqueeze(2)
 
         return out
-
-
-''' SE-Res2Block of the ECAPA-TDNN architecture.
-'''
-
-
-# def SE_Res2Block(channels, kernel_size, stride, padding, dilation, scale):
-#     return nn.Sequential(
-#         Conv1dReluBn(channels, 512, kernel_size=1, stride=1, padding=0),
-#         Res2Conv1dReluBn(512, kernel_size, stride, padding, dilation, scale=scale),
-#         Conv1dReluBn(512, channels, kernel_size=1, stride=1, padding=0),
-#         SE_Connect(channels)
-#     )
 
 
 class SE_Res2Block(nn.Module):
@@ -125,24 +197,18 @@ class SE_Res2Block(nn.Module):
         return x + residual
 
 
-''' Attentive weighted mean and standard deviation pooling.
-'''
-
-
 class AttentiveStatsPool(nn.Module):
     def __init__(self, in_dim, attention_channels=128, global_context_att=False):
         super().__init__()
         self.global_context_att = global_context_att
 
-        # Use Conv1d with stride == 1 rather than Linear, then we don't need to transpose inputs.
         if global_context_att:
-            self.linear1 = nn.Conv1d(in_dim * 3, attention_channels, kernel_size=1)  # equals W and b in the paper
+            self.linear1 = nn.Conv1d(in_dim * 3, attention_channels, kernel_size=1)
         else:
-            self.linear1 = nn.Conv1d(in_dim, attention_channels, kernel_size=1)  # equals W and b in the paper
-        self.linear2 = nn.Conv1d(attention_channels, in_dim, kernel_size=1)  # equals V and k in the paper
+            self.linear1 = nn.Conv1d(in_dim, attention_channels, kernel_size=1)
+        self.linear2 = nn.Conv1d(attention_channels, in_dim, kernel_size=1)
 
     def forward(self, x):
-
         if self.global_context_att:
             context_mean = torch.mean(x, dim=-1, keepdim=True).expand_as(x)
             context_std = torch.sqrt(torch.var(x, dim=-1, keepdim=True) + 1e-10).expand_as(x)
@@ -150,9 +216,7 @@ class AttentiveStatsPool(nn.Module):
         else:
             x_in = x
 
-        # DON'T use ReLU here! In experiments, I find ReLU hard to converge.
         alpha = torch.tanh(self.linear1(x_in))
-        # alpha = F.relu(self.linear1(x_in))
         alpha = torch.softmax(self.linear2(alpha), dim=2)
         mean = torch.sum(alpha * x, dim=2)
         residuals = torch.sum(alpha * (x ** 2), dim=2) - mean ** 2
@@ -192,15 +256,24 @@ class ECAPA_TDNN(nn.Module):
             self.feature_extract = trans.MFCC(sample_rate=sr, n_mfcc=feat_dim, log_mels=False,
                                               melkwargs=melkwargs)
         else:
+            # Self-supervised speech model (WavLM, HuBERT, etc.)
+            # Uses HuggingFace transformers instead of s3prl torch.hub
             if config_path is None:
-                torch.hub._validate_not_a_forked_repo=lambda a,b,c: True
-                self.feature_extract = torch.hub.load('s3prl/s3prl', feat_type)
+                repo_id = _TRANSFORMERS_BACKENDS.get(feat_type, "microsoft/wavlm-large")
+                self.feature_extract = _TransformerFeatureExtractor(repo_id)
             else:
-                self.feature_extract = UpstreamExpert(config_path)
-            if len(self.feature_extract.model.encoder.layers) == 24 and hasattr(self.feature_extract.model.encoder.layers[23].self_attn, "fp32_attention"):
-                self.feature_extract.model.encoder.layers[23].self_attn.fp32_attention = False
-            if len(self.feature_extract.model.encoder.layers) == 24 and hasattr(self.feature_extract.model.encoder.layers[11].self_attn, "fp32_attention"):
-                self.feature_extract.model.encoder.layers[11].self_attn.fp32_attention = False
+                # Legacy path for custom fairseq checkpoints — not implemented with transformers
+                raise NotImplementedError(
+                    "Loading a custom fairseq checkpoint via config_path is no longer supported. "
+                    "Use a HuggingFace model repo ID as feat_type instead."
+                )
+
+            # Disable fp32_attention for large models (legacy s3prl compat — no-op for transformers)
+            encoder_layers = getattr(self.feature_extract.encoder, "layers", None)
+            if encoder_layers is not None and len(encoder_layers) == 24:
+                for layer in encoder_layers:
+                    if hasattr(layer, "self_attn") and hasattr(layer.self_attn, "fp32_attention"):
+                        layer.self_attn.fp32_attention = False
 
             self.feat_num = self.get_feat_num()
             self.feature_weight = nn.Parameter(torch.zeros(self.feat_num))
@@ -225,13 +298,11 @@ class ECAPA_TDNN(nn.Module):
         self.layer3 = SE_Res2Block(self.channels[1], self.channels[2], kernel_size=3, stride=1, padding=3, dilation=3, scale=8, se_bottleneck_dim=128)
         self.layer4 = SE_Res2Block(self.channels[2], self.channels[3], kernel_size=3, stride=1, padding=4, dilation=4, scale=8, se_bottleneck_dim=128)
 
-        # self.conv = nn.Conv1d(self.channels[-1], self.channels[-1], kernel_size=1)
         cat_channels = channels * 3
         self.conv = nn.Conv1d(cat_channels, self.channels[-1], kernel_size=1)
         self.pooling = AttentiveStatsPool(self.channels[-1], attention_channels=128, global_context_att=global_context_att)
         self.bn = nn.BatchNorm1d(self.channels[-1] * 2)
         self.linear = nn.Linear(self.channels[-1] * 2, emb_dim)
-
 
     def get_feat_num(self):
         self.feature_extract.eval()
@@ -250,7 +321,7 @@ class ECAPA_TDNN(nn.Module):
         else:
             with torch.no_grad():
                 if self.feat_type == 'fbank' or self.feat_type == 'mfcc':
-                    x = self.feature_extract(x) + 1e-6  # B x feat_dim x time_len
+                    x = self.feature_extract(x) + 1e-6
                 else:
                     x = self.feature_extract([sample for sample in x])
 
@@ -290,12 +361,10 @@ def ECAPA_TDNN_SMALL(feat_dim, emb_dim=256, feat_type='fbank', sr=16000, feature
     return ECAPA_TDNN(feat_dim=feat_dim, channels=512, emb_dim=emb_dim,
                       feat_type=feat_type, sr=sr, feature_selection=feature_selection, update_extract=update_extract, config_path=config_path)
 
+
 if __name__ == '__main__':
     x = torch.zeros(2, 32000)
-    model = ECAPA_TDNN_SMALL(feat_dim=768, emb_dim=256, feat_type='hubert_base', feature_selection="hidden_states",
+    model = ECAPA_TDNN_SMALL(feat_dim=768, emb_dim=256, feat_type='wavlm_base_plus', feature_selection="hidden_states",
                               update_extract=False)
-
     out = model(x)
-    # print(model)
     print(out.shape)
-

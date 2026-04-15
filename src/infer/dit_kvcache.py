@@ -15,7 +15,7 @@ from einops import rearrange
 from x_transformers.x_transformers import RotaryEmbedding
 
 from src.model.prompt_vp import MRTE
-from modules import (
+from src.infer.modules import (
     TimestepEmbedding,
     ChunkDiTBlock,
     AdaLayerNorm_Final,

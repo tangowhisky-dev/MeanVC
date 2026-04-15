@@ -38,7 +38,10 @@ def extract_fbanks(
     return fbanks
 
 
-asr = torch.jit.load('src/runtime/ckpt/fastu2++.pt').to(device)
+# Resolve checkpoint path relative to project root (assets/ folder)
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_ASR_CKPT = os.path.join(_PROJECT_ROOT, 'assets', 'ckpt', 'fastu2++.pt')
+asr = torch.jit.load(_ASR_CKPT).to(device)
 
 def extract_bn(wav_path):
     

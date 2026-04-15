@@ -47,10 +47,13 @@ class MelSpectrogramFeatures(nn.Module):
         if wnsize_dtype_device not in self.hann_window:
             self.hann_window[wnsize_dtype_device] = torch.hann_window(self.win_size).to(dtype=y.dtype, device=y.device)
 
-        spec = torch.stft(y, self.n_fft, hop_length=self.hop_length, win_length=self.win_size, window=self.hann_window[wnsize_dtype_device],
-                        center=self.center, pad_mode='reflect', normalized=False, onesided=True, return_complex=False)
-
-        spec = torch.sqrt(spec.pow(2).sum(-1) + 1e-6)
+        # Use return_complex=True (PyTorch ≥ 2.0 API; return_complex=False is deprecated)
+        spec_complex = torch.stft(y, self.n_fft, hop_length=self.hop_length, win_length=self.win_size,
+                        window=self.hann_window[wnsize_dtype_device],
+                        center=self.center, pad_mode='reflect', normalized=False, onesided=True,
+                        return_complex=True)
+        spec = spec_complex.abs()
+        spec = torch.sqrt(spec.pow(2) + 1e-6)
 
         spec = torch.matmul(self.mel_basis[fmax_dtype_device], spec)
 

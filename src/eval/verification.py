@@ -1,7 +1,7 @@
 import soundfile as sf
 import torch
 import os
-from collections import defaultdict 
+from collections import defaultdict
 import argparse
 from tqdm import tqdm
 import numpy as np
@@ -10,30 +10,41 @@ from torchaudio.transforms import Resample
 from .ecapa_tdnn import ECAPA_TDNN_SMALL
 import glob
 
+# All supported self-supervised speech models (HuggingFace transformers)
 MODEL_LIST = ['ecapa_tdnn', 'hubert_large', 'wav2vec2_xlsr', 'unispeech_sat', "wavlm_base_plus", "wavlm_large"]
 
 
 def init_model(model_name, checkpoint=None):
+    """Initialise an ECAPA-TDNN speaker verification model.
+
+    Parameters
+    ----------
+    model_name : str
+        One of ``'wavlm_large'``, ``'wavlm_base_plus'``, ``'hubert_large'``,
+        ``'wav2vec2_xlsr'``, ``'unispeech_sat'``, or ``'ecapa_tdnn'`` (fbank).
+    checkpoint : str, optional
+        Path to a fine-tuned ECAPA-TDNN checkpoint (``.pth``). The checkpoint
+        should contain a ``'model'`` key with the state dict.
+
+    Returns
+    -------
+    ECAPA_TDNN
+    """
     if model_name == 'unispeech_sat':
-        config_path = 'config/unispeech_sat.th'
-        model = ECAPA_TDNN_SMALL(feat_dim=1024, feat_type='unispeech_sat', config_path=config_path)
+        model = ECAPA_TDNN_SMALL(feat_dim=1024, feat_type='unispeech_sat')
     elif model_name == 'wavlm_base_plus':
-        config_path = None
-        model = ECAPA_TDNN_SMALL(feat_dim=768, feat_type='wavlm_base_plus', config_path=config_path)
+        model = ECAPA_TDNN_SMALL(feat_dim=768, feat_type='wavlm_base_plus')
     elif model_name == 'wavlm_large':
-        config_path = None
-        model = ECAPA_TDNN_SMALL(feat_dim=1024, feat_type='wavlm_large', config_path=config_path)
+        model = ECAPA_TDNN_SMALL(feat_dim=1024, feat_type='wavlm_large')
     elif model_name == 'hubert_large':
-        config_path = None
-        model = ECAPA_TDNN_SMALL(feat_dim=1024, feat_type='hubert_large_ll60k', config_path=config_path)
+        model = ECAPA_TDNN_SMALL(feat_dim=1024, feat_type='hubert_large_ll60k')
     elif model_name == 'wav2vec2_xlsr':
-        config_path = None
-        model = ECAPA_TDNN_SMALL(feat_dim=1024, feat_type='wav2vec2_xlsr', config_path=config_path)
+        model = ECAPA_TDNN_SMALL(feat_dim=1024, feat_type='wav2vec2_xlsr')
     else:
         model = ECAPA_TDNN_SMALL(feat_dim=40, feat_type='fbank')
 
     if checkpoint is not None:
-        state_dict = torch.load(checkpoint, map_location=lambda storage, loc: storage)
+        state_dict = torch.load(checkpoint, map_location='cpu', weights_only=True)  # safe: plain state-dict, no TorchScript code tree
         model.load_state_dict(state_dict['model'], strict=False)
     return model
 
@@ -71,7 +82,7 @@ if __name__ == "__main__":
     parser.add_argument('--output')
     parser.add_argument('--device', default="cuda:0")
     args = parser.parse_args()
-    
+
     wav_dir = args.wavs
     target_spk = args.target_spk
     output = args.output
@@ -79,12 +90,15 @@ if __name__ == "__main__":
 
     wavs = glob.glob(os.path.join(wav_dir, '*.wav'))
 
-    model = init_model('wavlm_large', 'path/test/smos/ckpt/wavlm_large_finetune.pth')
+    # Resolve checkpoint path relative to project root
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    ckpt_path = os.path.join(project_root, 'assets', 'wavLM', 'wavlm_large_finetune.pth')
+
+    model = init_model('wavlm_large', ckpt_path)
     model.eval()
     model.to(device)
 
     sims = verification_v1(model, target_spk, wavs, device, 16000)
-    # open(output, 'w').writelines([f"{sum(sims.values())/len(list(sims.keys()))}\n", str(sims)+'\n'])
     with open(output, 'w') as f:
         f.write(f"{sum(sims.values())/len(list(sims.keys()))}\n")
         for key, value in sims.items():
