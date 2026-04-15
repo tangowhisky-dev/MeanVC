@@ -42,6 +42,7 @@ _ASSETS = os.path.join(_PROJECT_ROOT, "assets")
 # Feature extraction helpers
 # ---------------------------------------------------------------------------
 
+
 def extract_fbanks(
     wav: np.ndarray,
     sample_rate: int = 16000,
@@ -68,17 +69,22 @@ def extract_fbanks(
 # VCRunner
 # ---------------------------------------------------------------------------
 
+
 class VCRunner:
     """Real-time voice conversion engine."""
 
-    def __init__(self, target_path: str, steps: int = 2) -> None:
+    def __init__(self, target_path: str, steps: int = 2, device: str = None) -> None:
         self.mutex = Lock()
         torch.set_num_threads(1)
+
+        self.device = get_device(device)
+        print(f"Using device: {self.device}")
 
         # Speaker verification model
         sv_ckpt = os.path.join(_ASSETS, "wavLM", "wavlm_large_finetune.pth")
         self.sv_model = init_sv_model("wavlm_large", sv_ckpt)
         self.sv_model.eval()
+        self.sv_model = self.sv_model.to(self.device)
 
         self.steps = steps
         if self.steps == 1:
@@ -90,8 +96,14 @@ class VCRunner:
 
         # Mel extractor (MPS/CPU compatible, return_complex=True)
         self.mel_extract = MelSpectrogramFeatures(
-            sample_rate=16000, n_fft=1024, win_size=640, hop_length=160,
-            n_mels=80, fmin=0, fmax=8000, center=True
+            sample_rate=16000,
+            n_fft=1024,
+            win_size=640,
+            hop_length=160,
+            n_mels=80,
+            fmin=0,
+            fmax=8000,
+            center=True,
         )
 
         # TorchScript models from assets/
@@ -99,9 +111,9 @@ class VCRunner:
         vc_ckpt = os.path.join(_ASSETS, "ckpt", "meanvc_200ms.pt")
         vocos_ckpt = os.path.join(_ASSETS, "ckpt", "vocos.pt")
 
-        self.asr = torch.jit.load(asr_ckpt)
-        self.vc = torch.jit.load(vc_ckpt)
-        self.vocoder = torch.jit.load(vocos_ckpt)
+        self.asr = torch.jit.load(asr_ckpt, map_location=self.device)
+        self.vc = torch.jit.load(vc_ckpt, map_location=self.device)
+        self.vocoder = torch.jit.load(vocos_ckpt, map_location=self.device)
 
         # Streaming parameters
         decoding_chunk_size = 5
@@ -116,7 +128,9 @@ class VCRunner:
         self.vocoder_overlap = 3
         upsample_factor = 160
         self.vocoder_wav_overlap = (self.vocoder_overlap - 1) * upsample_factor
-        self.down_linspace = torch.linspace(1, 0, steps=self.vocoder_wav_overlap).numpy()
+        self.down_linspace = torch.linspace(
+            1, 0, steps=self.vocoder_wav_overlap
+        ).numpy()
         self.up_linspace = torch.linspace(0, 1, steps=self.vocoder_wav_overlap).numpy()
 
         # Load reference speaker audio using torchaudio (TorchCodec backend)
@@ -142,8 +156,8 @@ class VCRunner:
         self.samples_cache_len = 720
         self.samples_cache: np.ndarray | None = None
 
-        self.att_cache = torch.zeros((0, 0, 0, 0), device="cpu")
-        self.cnn_cache = torch.zeros((0, 0, 0, 0), device="cpu")
+        self.att_cache = torch.zeros((0, 0, 0, 0), device=self.device)
+        self.cnn_cache = torch.zeros((0, 0, 0, 0), device=self.device)
         self.asr_offset = 0
         self.encoder_output_cache: torch.Tensor | None = None
 
@@ -184,9 +198,14 @@ class VCRunner:
             self.samples_cache = samples[-self.samples_cache_len :]
 
             fbanks = extract_fbanks(samples, frame_shift=10).float()
-            encoder_output, self.att_cache, self.cnn_cache = self.asr.forward_encoder_chunk(
-                fbanks, self.asr_offset, self.required_cache_size,
-                self.att_cache, self.cnn_cache,
+            encoder_output, self.att_cache, self.cnn_cache = (
+                self.asr.forward_encoder_chunk(
+                    fbanks,
+                    self.asr_offset,
+                    self.required_cache_size,
+                    self.att_cache,
+                    self.cnn_cache,
+                )
             )
 
             self.asr_offset += encoder_output.size(1)
@@ -214,9 +233,14 @@ class VCRunner:
                 t_t = torch.full((1,), t)
                 r_t = torch.full((1,), r)
                 u, tmp_kv_cache = self.vc(
-                    x, t_t, r_t,
-                    cache=self.vc_cache, cond=enc_up, spks=self.vc_spk_emb,
-                    prompts=self.vc_prompt_mel, offset=self.vc_offset,
+                    x,
+                    t_t,
+                    r_t,
+                    cache=self.vc_cache,
+                    cond=enc_up,
+                    spks=self.vc_spk_emb,
+                    prompts=self.vc_prompt_mel,
+                    offset=self.vc_offset,
                     kv_cache=self.vc_kv_cache,
                 )
                 x = x - (t - r) * u
@@ -246,12 +270,12 @@ class VCRunner:
 
             if self.last_wav is not None:
                 front = wav_np[: self.vocoder_wav_overlap]
-                smooth = (
-                    self.last_wav * self.down_linspace
-                    + front * self.up_linspace
-                )
+                smooth = self.last_wav * self.down_linspace + front * self.up_linspace
                 new_wav = np.concatenate(
-                    [smooth, wav_np[self.vocoder_wav_overlap : -self.vocoder_wav_overlap]]
+                    [
+                        smooth,
+                        wav_np[self.vocoder_wav_overlap : -self.vocoder_wav_overlap],
+                    ]
                 )
             else:
                 new_wav = wav_np[: -self.vocoder_wav_overlap]
@@ -294,19 +318,27 @@ class VCRunner:
         print("Warming up…")
 
         self.in_stream = p.open(
-            format=pyaudio.paInt16, channels=1, rate=16000,
-            input=True, input_device_index=input_device_id,
+            format=pyaudio.paInt16,
+            channels=1,
+            rate=16000,
+            input=True,
+            input_device_index=input_device_id,
             frames_per_buffer=self.CHUNK,
         )
         self.out_stream = p.open(
-            format=pyaudio.paFloat32, channels=1, rate=16000,
-            output=True, output_device_index=output_device_id,
+            format=pyaudio.paFloat32,
+            channels=1,
+            rate=16000,
+            output=True,
+            output_device_index=output_device_id,
         )
 
         for _ in tqdm(range(10), desc="warmup"):
             data = self.in_stream.read(self.CHUNK, exception_on_overflow=False)
             samples = np.frombuffer(data, dtype=np.int16).astype(np.float32) / (1 << 15)
-            Thread(target=self.playaudio, args=(self.out_stream, samples.tobytes())).start()
+            Thread(
+                target=self.playaudio, args=(self.out_stream, samples.tobytes())
+            ).start()
 
         self.init_cache()
 
@@ -321,21 +353,28 @@ class VCRunner:
 
             if self.need_extra_data:
                 extra = self.in_stream.read(720, exception_on_overflow=False)
-                extra_s = np.frombuffer(extra, dtype=np.int16).astype(np.float32) / (1 << 15)
+                extra_s = np.frombuffer(extra, dtype=np.int16).astype(np.float32) / (
+                    1 << 15
+                )
                 samples = np.concatenate([samples, extra_s])
                 self.need_extra_data = False
 
             t0 = time.time()
             vc_wav = self.inference_one_chunk(samples)
             processed_duration = len(samples) / 16000
-            Thread(target=self.playaudio, args=(self.out_stream, vc_wav.tobytes())).start()
-            print(f"chunk time {time.time() - t0:.3f}s  chunk size {processed_duration:.3f}s")
+            Thread(
+                target=self.playaudio, args=(self.out_stream, vc_wav.tobytes())
+            ).start()
+            print(
+                f"chunk time {time.time() - t0:.3f}s  chunk size {processed_duration:.3f}s"
+            )
             i += 1
 
 
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="MeanVC real-time voice conversion")
@@ -348,12 +387,18 @@ def main() -> None:
     )
     parser.add_argument("--steps", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="Device: cuda, mps, cpu or auto-detect. Can also set MEANVC_DEVICE env var.",
+    )
     args = parser.parse_args()
 
     torch.set_num_threads(1)
     torch.manual_seed(args.seed)
 
-    runner = VCRunner(args.target_path, steps=args.steps)
+    runner = VCRunner(args.target_path, steps=args.steps, device=args.device)
     try:
         runner.run()
     except KeyboardInterrupt:

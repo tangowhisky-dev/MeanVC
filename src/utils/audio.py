@@ -11,6 +11,7 @@ All torch.stft calls use return_complex=True (PyTorch ≥ 2.0 API).
 
 from __future__ import annotations
 
+import os
 import torch
 import torch.nn as nn
 import torchaudio
@@ -23,25 +24,35 @@ from librosa.filters import mel as librosa_mel_fn
 # Device helper
 # ---------------------------------------------------------------------------
 
+
 def get_device(prefer: str | None = None) -> str:
     """Return the best available torch device string.
 
-    Priority: prefer (if given & available) → cuda → mps → cpu.
+    Priority: MEANVC_DEVICE env var → prefer (if given & available) → cuda → mps → cpu.
+
+    The environment variable MEANVC_DEVICE can be set to: cpu, mps, cuda, cuda:0, etc.
 
     Args:
         prefer: Optional explicit device string (``'cpu'``, ``'mps'``,
                 ``'cuda'``, ``'cuda:0'``, …).  If unavailable, falls
                 back to auto-selection.
     """
+    env_device = os.environ.get("MEANVC_DEVICE", None)
+    if env_device is not None:
+        if env_device.startswith("cuda") and torch.cuda.is_available():
+            return env_device
+        if env_device == "mps" and torch.backends.mps.is_available():
+            return "mps"
+        if env_device == "cpu":
+            return "cpu"
+
     if prefer is not None:
-        # Honour explicit request if possible
         if prefer.startswith("cuda") and torch.cuda.is_available():
             return prefer
         if prefer == "mps" and torch.backends.mps.is_available():
             return "mps"
         if prefer == "cpu":
             return "cpu"
-        # Requested device not available — fall through to auto
 
     if torch.cuda.is_available():
         return "cuda"
@@ -53,6 +64,7 @@ def get_device(prefer: str | None = None) -> str:
 # ---------------------------------------------------------------------------
 # Mel spectrogram (custom — matches MeanVC training recipe)
 # ---------------------------------------------------------------------------
+
 
 def _amp_to_db(x: torch.Tensor, min_level_db: float) -> torch.Tensor:
     min_level = np.exp(min_level_db / 20 * np.log(10))
@@ -155,7 +167,7 @@ class MelSpectrogramFeatures(nn.Module):
             pad_mode="reflect",
             normalized=False,
             onesided=True,
-            return_complex=True,   # ← modern API; no deprecation warning
+            return_complex=True,  # ← modern API; no deprecation warning
         )
         # Magnitude: |complex| = sqrt(re² + im²)
         spec = spec_complex.abs()
@@ -176,6 +188,7 @@ class MelSpectrogramFeatures(nn.Module):
 # Audio loading helper
 # ---------------------------------------------------------------------------
 
+
 def load_wav(
     path: str,
     target_sr: int = 16000,
@@ -193,15 +206,13 @@ def load_wav(
     Returns:
         ``(waveform, sample_rate)`` where waveform is ``(1, T)`` float32.
     """
-    wav, sr = torchaudio.load(path)          # shape: (C, T), float32
+    wav, sr = torchaudio.load(path)  # shape: (C, T), float32
 
     if mono and wav.shape[0] > 1:
         wav = wav.mean(dim=0, keepdim=True)  # (1, T)
 
     if sr != target_sr:
-        resampler = torchaudio.transforms.Resample(
-            orig_freq=sr, new_freq=target_sr
-        )
+        resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=target_sr)
         wav = resampler(wav)
 
     return wav, target_sr

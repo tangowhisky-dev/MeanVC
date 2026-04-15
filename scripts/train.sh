@@ -1,5 +1,15 @@
 export PYTHONPATH=$PYTHONPATH:$PWD
 
+# Device selection for training:
+# Set MEANVC_DEVICE environment variable before running (optional)
+# Options: cuda, mps, cpu (auto-detects by default)
+# export MEANVC_DEVICE=cuda  # Use CUDA GPU
+# export MEANVC_DEVICE=mps   # Use Apple Silicon MPS (experimental)
+# export MEANVC_DEVICE=cpu   # Force CPU
+
+# Note: Training typically uses accelerate with multiple GPUs
+# The device will be automatically selected based on available hardware
+
 cuda=$1
 
 IFS=',' read -ra parts <<< "$cuda"

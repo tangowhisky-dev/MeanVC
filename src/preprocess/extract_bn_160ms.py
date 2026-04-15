@@ -1,4 +1,3 @@
-
 import sys
 import numpy as np
 from tqdm import tqdm
@@ -12,11 +11,12 @@ import argparse
 
 from multiprocessing import Pool
 import multiprocessing
-multiprocessing.set_start_method('spawn', force=True)
 
-device = 'cpu'
-if torch.cuda.is_available():
-    device = 'cuda'
+multiprocessing.set_start_method("spawn", force=True)
+
+from src.utils.audio import get_device
+
+device = get_device()
 
 
 def extract_fbanks(
@@ -39,12 +39,15 @@ def extract_fbanks(
 
 
 # Resolve checkpoint path relative to project root (assets/ folder)
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-_ASR_CKPT = os.path.join(_PROJECT_ROOT, 'assets', 'ckpt', 'fastu2++.pt')
+_PROJECT_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
+_ASR_CKPT = os.path.join(_PROJECT_ROOT, "assets", "ckpt", "fastu2++.pt")
 asr = torch.jit.load(_ASR_CKPT).to(device)
 
+
 def extract_bn(wav_path):
-    
+
     in_wav, _ = librosa.load(wav_path, sr=16000)
 
     fbanks = extract_fbanks(in_wav, frame_shift=10).float().to(device)
@@ -56,20 +59,21 @@ def extract_bn(wav_path):
     stride = subsampling * decoding_chunk_size
     required_cache_size = decoding_chunk_size * num_decoding_left_chunks
     decoding_window = (decoding_chunk_size - 1) * subsampling + context
-    att_cache: torch.Tensor = torch.zeros((0, 0, 0, 0), device='cpu')
-    cnn_cache: torch.Tensor = torch.zeros((0, 0, 0, 0), device='cpu')
+    att_cache: torch.Tensor = torch.zeros((0, 0, 0, 0), device=device)
+    cnn_cache: torch.Tensor = torch.zeros((0, 0, 0, 0), device=device)
     bns = []
     for i in range(0, fbanks.shape[1], 16):
-        fbank = fbanks[:, i:i+19, :]
+        fbank = fbanks[:, i : i + 19, :]
         if fbank.shape[1] < 10:
             break
         (encoder_output, att_cache, cnn_cache) = asr.forward_encoder_chunk(
-            fbank, offset, required_cache_size, att_cache, cnn_cache)
+            fbank, offset, required_cache_size, att_cache, cnn_cache
+        )
 
         bns.append(encoder_output)
 
         offset += encoder_output.size(1)
-    
+
     bn = torch.cat(bns, dim=1)
     bn = bn.squeeze()
     bn = bn.detach().cpu().numpy()
@@ -82,13 +86,12 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", type=str, help="out bn feature dir")
     parser.add_argument("--filelist", type=str, help="filelst", default=None)
 
-
     args = parser.parse_args()
 
     data_root = args.input_dir
     out_data_root = args.output_dir
     filelist = args.filelist
-    
+
     os.makedirs(out_data_root, exist_ok=True)
 
     if filelist is not None:
@@ -103,4 +106,4 @@ if __name__ == "__main__":
             bn = extract_bn(wav_path)
         except:
             print("!!!!!!!", wav_path)
-        np.save(os.path.join(out_data_root, wav_filename.split('.')[0]), bn)
+        np.save(os.path.join(out_data_root, wav_filename.split(".")[0]), bn)

@@ -1,5 +1,11 @@
 export PYTHONPATH=$PYTHONPATH:$PWD
 
+# Device selection: Set MEANVC_DEVICE environment variable before running
+# Options: cuda, mps, cpu (auto-detects by default)
+# export MEANVC_DEVICE=cuda  # Use CUDA GPU
+# export MEANVC_DEVICE=mps   # Use Apple Silicon MPS
+# export MEANVC_DEVICE=cpu   # Force CPU
+
 # All checkpoints live in assets/ — run download_ckpt.py first to populate.
 model_path=assets/ckpt/model_200ms.safetensors
 vocoder_path=assets/ckpt/vocos.pt

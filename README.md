@@ -39,6 +39,30 @@ conda activate meanvc
 pip install -r requirements.txt
 ```
 
+### Device Selection
+
+By default, MeanVC automatically selects the best available device (CUDA > MPS > CPU). You can also set the device using the `MEANVC_DEVICE` environment variable:
+
+```bash
+# Use CUDA GPU
+export MEANVC_DEVICE=cuda
+
+# Use Apple Silicon GPU (MPS)
+export MEANVC_DEVICE=mps
+
+# Force CPU
+export MEANVC_DEVICE=cpu
+
+# Use specific GPU
+export MEANVC_DEVICE=cuda:1
+```
+
+Alternatively, pass `--device` argument to inference/preprocessing scripts to override the default:
+
+```bash
+python src/infer/infer_ref.py --device mps --source-path ... --reference-path ...
+```
+
 ### 2. Download Pre-trained Models
 
 Run the provided script to automatically download all necessary pre-trained models.
@@ -91,6 +115,9 @@ To train the model on your own dataset, follow these steps.
 First, you need to extract Mel spectrograms, content features (BN), and speaker embeddings from your audio data.
 
 ```bash
+# Set device for preprocessing (optional - defaults to auto-detect)
+export MEANVC_DEVICE=cuda
+
 # 1. Extract Mel spectrograms (10ms frame shift)
 python src/preprocess/extrace_mel_10ms.py --input_dir path/to/wavs --output_dir path/to/mels
 
@@ -99,6 +126,9 @@ python src/preprocess/extract_bn_160ms.py --input_dir path/to/wavs --output_dir 
 
 # 3. Extract speaker embeddings
 python src/preprocess/extract_spk_emb_wavlm.py --input_dir path/to/wavs --output_dir path/to/xvectors
+
+# Or force specific device:
+python src/preprocess/extrace_mel_10ms.py --input_dir path/to/wavs --output_dir path/to/mels --device mps
 ```
 
 ### 2. Prepare Data List
