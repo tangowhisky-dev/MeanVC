@@ -11,7 +11,7 @@ from typing import Optional
 import uuid
 
 
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 DB_PATH = os.path.join(DATA_DIR, "meanvc.db")
 PROFILES_ROOT = os.path.join(DATA_DIR, "profiles")

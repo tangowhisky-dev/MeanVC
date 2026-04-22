@@ -1,221 +1,394 @@
-"""Offline conversion page for batch processing."""
+"""Offline conversion page — file-to-file voice conversion."""
 
+from __future__ import annotations
+
+import os
+
+from PySide6.QtCore import Qt, QThread, Signal, QUrl
+from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtWidgets import (
-    QWidget,
-    QVBoxLayout,
+    QComboBox,
+    QFileDialog,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
-    QPushButton,
-    QLineEdit,
-    QFileDialog,
     QProgressBar,
-    QGroupBox,
+    QPushButton,
     QSlider,
-    QComboBox,
+    QVBoxLayout,
+    QWidget,
 )
-from PySide6.QtCore import Qt, QThread, Signal
 
-from meanvc_gui.components.theme import COLORS, get_button_style
+from meanvc_gui.components.theme import (
+    COLORS,
+    CardFrame,
+    DangerButton,
+    PrimaryButton,
+    SecondaryButton,
+    SecondaryLabel,
+    SectionTitle,
+    get_button_style,
+)
 from meanvc_gui.core.engine import get_engine
+from meanvc_gui.core.profile_manager import get_profile_manager
 
+# Project root for default output dir
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(_HERE))
+
+
+# ---------------------------------------------------------------------------
+# Background conversion worker
+# ---------------------------------------------------------------------------
 
 class ConversionWorker(QThread):
-    """Background conversion worker."""
+    """Runs engine.convert() off the Qt main thread."""
 
-    progress = Signal(int)
-    finished = Signal(str)
-    error = Signal(str)
+    progress  = Signal(int, str)   # percent, message
+    finished  = Signal(str)        # output path
+    error     = Signal(str)        # error message
 
-    def __init__(self, source, ref, model_type, steps):
-        super().__init__()
-        self.source = source
-        self.ref = ref
-        self.model_type = model_type
-        self.steps = steps
+    def __init__(
+        self,
+        source_path: str,
+        ref_path: str,
+        steps: int,
+        output_dir: str,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.source_path = source_path
+        self.ref_path    = ref_path
+        self.steps       = steps
+        self.output_dir  = output_dir
+        self._cancelled  = False
 
-    def run(self):
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def run(self) -> None:
         try:
             engine = get_engine()
-            output = engine.convert(self.source, self.ref, self.model_type, self.steps)
+            output = engine.convert(
+                source_path   = self.source_path,
+                ref_path      = self.ref_path,
+                steps         = self.steps,
+                output_dir    = self.output_dir,
+                progress_cb   = lambda pct, msg: self.progress.emit(pct, msg),
+                cancelled_cb  = lambda: self._cancelled,
+            )
             self.finished.emit(output)
-        except Exception as e:
-            self.error.emit(str(e))
+        except Exception as exc:
+            self.error.emit(str(exc))
 
+
+# ---------------------------------------------------------------------------
+# Offline page
+# ---------------------------------------------------------------------------
 
 class OfflinePage(QWidget):
-    """Offline batch conversion page."""
+    """File-based offline voice conversion page."""
 
-    def __init__(self, app):
-        """Initialize offline page.
-
-        Args:
-            app: Main window reference
-        """
+    def __init__(self, app) -> None:
         super().__init__()
         self.app = app
-        self.source_path = ""
-        self.reference_path = ""
-        self.converting = False
-        self._setup_ui()
+        self.source_path    = ""
+        self.ref_path       = ""
+        self.output_path    = ""
+        self._worker: ConversionWorker | None = None
+        self._player        = QMediaPlayer()
+        self._audio_out     = QAudioOutput()
+        self._player.setAudioOutput(self._audio_out)
+        self._build()
+        self._subscribe()
 
-    def _setup_ui(self):
-        """Setup the UI."""
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
+    # ------------------------------------------------------------------
+    # UI
+    # ------------------------------------------------------------------
 
-        # Title
-        title = QLabel("Offline Conversion")
-        title.setStyleSheet(
-            f"font-size: 24px; color: {COLORS['text']}; font-weight: 300;"
+    def _build(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(28, 24, 28, 24)
+        root.setSpacing(16)
+
+        root.addWidget(SectionTitle("Offline Conversion"))
+
+        # ---- Profile picker ----
+        profile_card = CardFrame()
+        pc = QVBoxLayout(profile_card)
+        pc.setContentsMargins(16, 14, 16, 14)
+        pc.setSpacing(8)
+        pc.addWidget(QLabel("Target Profile"))
+        profile_row = QHBoxLayout()
+        self._profile_combo = QComboBox()
+        self._profile_combo.setPlaceholderText("Select a voice profile…")
+        profile_row.addWidget(self._profile_combo, 1)
+        refresh_btn = QPushButton("↺")
+        refresh_btn.setFixedSize(32, 32)
+        refresh_btn.setToolTip("Refresh profile list")
+        refresh_btn.clicked.connect(self._populate_profiles)
+        profile_row.addWidget(refresh_btn)
+        pc.addLayout(profile_row)
+        root.addWidget(profile_card)
+
+        # ---- File inputs ----
+        files_card = CardFrame()
+        fc = QVBoxLayout(files_card)
+        fc.setContentsMargins(16, 14, 16, 14)
+        fc.setSpacing(10)
+        fc.addWidget(QLabel("Source Audio"))
+
+        # Source
+        src_row = QHBoxLayout()
+        self._src_label = QLabel("No file selected")
+        self._src_label.setStyleSheet(f"color: {COLORS['text_muted']}; background: transparent;")
+        src_row.addWidget(self._src_label, 1)
+        src_btn = QPushButton("Browse…")
+        src_btn.clicked.connect(self._pick_source)
+        src_row.addWidget(src_btn)
+        fc.addLayout(src_row)
+        root.addWidget(files_card)
+
+        # ---- Settings ----
+        settings_card = CardFrame()
+        sc = QVBoxLayout(settings_card)
+        sc.setContentsMargins(16, 14, 16, 14)
+        sc.setSpacing(10)
+
+        # Steps
+        steps_row = QHBoxLayout()
+        steps_row.addWidget(QLabel("Denoising Steps"))
+        self._steps_slider = QSlider(Qt.Horizontal)
+        self._steps_slider.setMinimum(1)
+        self._steps_slider.setMaximum(4)
+        self._steps_slider.setValue(2)
+        self._steps_slider.setTickPosition(QSlider.TicksBelow)
+        self._steps_slider.setTickInterval(1)
+        steps_row.addWidget(self._steps_slider, 1)
+        self._steps_label = QLabel("2")
+        self._steps_label.setFixedWidth(20)
+        steps_row.addWidget(self._steps_label)
+        self._steps_slider.valueChanged.connect(
+            lambda v: self._steps_label.setText(str(v))
         )
-        layout.addWidget(title)
-        layout.addSpacing(20)
+        sc.addLayout(steps_row)
 
-        # File selection group
-        file_group = QGroupBox("Audio Files")
-        file_layout = QVBoxLayout()
+        # Output directory
+        out_row = QHBoxLayout()
+        default_out = os.path.join(_PROJECT_ROOT, "meanvc_out")
+        self._out_label = QLabel(default_out)
+        self._out_label.setStyleSheet(f"color: {COLORS['text_secondary']}; font-size: 12px; background: transparent;")
+        out_row.addWidget(QLabel("Output Dir"))
+        out_row.addWidget(self._out_label, 1)
+        out_pick = QPushButton("…")
+        out_pick.setFixedSize(32, 32)
+        out_pick.clicked.connect(self._pick_output_dir)
+        out_row.addWidget(out_pick)
+        sc.addLayout(out_row)
+        self._output_dir = default_out
+        root.addWidget(settings_card)
 
-        # Source file
-        source_layout = QHBoxLayout()
-        source_layout.addWidget(QLabel("Source:"))
-        self.source_edit = QLineEdit()
-        self.source_edit.setPlaceholderText("Select source audio file...")
-        source_layout.addWidget(self.source_edit, 1)
-        source_btn = QPushButton("Browse")
-        source_btn.clicked.connect(self._pick_source)
-        source_layout.addWidget(source_btn)
-        file_layout.addLayout(source_layout)
+        # ---- Action buttons ----
+        action_row = QHBoxLayout()
+        self._convert_btn = PrimaryButton("Convert")
+        self._convert_btn.clicked.connect(self._start_conversion)
+        action_row.addWidget(self._convert_btn)
+        self._cancel_btn = SecondaryButton("Cancel")
+        self._cancel_btn.setEnabled(False)
+        self._cancel_btn.clicked.connect(self._cancel_conversion)
+        action_row.addWidget(self._cancel_btn)
+        action_row.addStretch()
+        root.addLayout(action_row)
 
-        # Reference file
-        ref_layout = QHBoxLayout()
-        ref_layout.addWidget(QLabel("Reference:"))
-        self.ref_edit = QLineEdit()
-        self.ref_edit.setPlaceholderText("Select reference audio file...")
-        ref_layout.addWidget(self.ref_edit, 1)
-        ref_btn = QPushButton("Browse")
-        ref_btn.clicked.connect(self._pick_reference)
-        ref_layout.addWidget(ref_btn)
-        file_layout.addLayout(ref_layout)
+        # ---- Progress ----
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setValue(0)
+        self._progress_bar.setFixedHeight(6)
+        root.addWidget(self._progress_bar)
+        self._phase_label = SecondaryLabel("")
+        root.addWidget(self._phase_label)
 
-        file_group.setLayout(file_layout)
-        layout.addWidget(file_group)
+        # ---- Result card ----
+        self._result_card = CardFrame()
+        self._result_card.hide()
+        rc = QVBoxLayout(self._result_card)
+        rc.setContentsMargins(16, 14, 16, 14)
+        rc.setSpacing(10)
+        rc.addWidget(QLabel("Conversion Complete ✓"))
+        self._result_path_label = SecondaryLabel("")
+        rc.addWidget(self._result_path_label)
+        play_row = QHBoxLayout()
+        self._play_btn = PrimaryButton("▶ Play")
+        self._play_btn.clicked.connect(self._toggle_play)
+        play_row.addWidget(self._play_btn)
+        self._send_analysis_btn = SecondaryButton("→ Analysis")
+        self._send_analysis_btn.setToolTip("Open in Analysis page for similarity check")
+        self._send_analysis_btn.clicked.connect(self._send_to_analysis)
+        play_row.addWidget(self._send_analysis_btn)
+        play_row.addStretch()
+        rc.addLayout(play_row)
+        root.addWidget(self._result_card)
 
-        layout.addSpacing(15)
+        root.addStretch()
 
-        # Settings group
-        settings_group = QGroupBox("Settings")
-        settings_layout = QVBoxLayout()
+        # Connect player state to button text
+        self._player.playbackStateChanged.connect(self._on_playback_state)
 
-        # Model type
-        model_layout = QHBoxLayout()
-        model_layout.addWidget(QLabel("Model:"))
-        self.model_combo = QComboBox()
-        self.model_combo.addItems(["200ms (Faster)", "160ms (Higher Quality)"])
-        model_layout.addWidget(self.model_combo)
-        model_layout.addStretch()
-        settings_layout.addLayout(model_layout)
+    def _subscribe(self) -> None:
+        """Subscribe to cross-page bus events."""
+        try:
+            from meanvc_gui.main import bus
+            bus.profile_selected.connect(self._on_profile_selected)
+        except Exception:
+            pass
+        self._populate_profiles()
 
-        # Steps slider
-        steps_layout = QHBoxLayout()
-        steps_layout.addWidget(QLabel("Steps:"))
-        self.steps_slider = QSlider(Qt.Horizontal)
-        self.steps_slider.setMinimum(1)
-        self.steps_slider.setMaximum(10)
-        self.steps_slider.setValue(1)
-        self.steps_label = QLabel("1")
-        steps_layout.addWidget(self.steps_slider)
-        steps_layout.addWidget(self.steps_label)
-        settings_layout.addLayout(steps_layout)
+    # ------------------------------------------------------------------
+    # Profile combo
+    # ------------------------------------------------------------------
 
-        settings_group.setLayout(settings_layout)
-        layout.addWidget(settings_group)
+    def _populate_profiles(self) -> None:
+        pm = get_profile_manager()
+        profiles = pm.list_profiles()
+        self._profile_combo.clear()
+        for p in profiles:
+            self._profile_combo.addItem(p["name"], p["id"])
+        # Pre-select app.current_profile if set
+        if hasattr(self.app, "current_profile") and self.app.current_profile:
+            pid = self.app.current_profile["id"]
+            for i in range(self._profile_combo.count()):
+                if self._profile_combo.itemData(i) == pid:
+                    self._profile_combo.setCurrentIndex(i)
+                    break
 
-        layout.addSpacing(15)
+    def _on_profile_selected(self, profile: dict) -> None:
+        pid = profile["id"]
+        for i in range(self._profile_combo.count()):
+            if self._profile_combo.itemData(i) == pid:
+                self._profile_combo.setCurrentIndex(i)
+                return
+        # Not yet in combo — refresh
+        self._populate_profiles()
 
-        # Actions
-        action_layout = QHBoxLayout()
-        self.convert_btn = QPushButton("Convert")
-        self.convert_btn.setStyleSheet(get_button_style())
-        self.convert_btn.clicked.connect(self._start_conversion)
-        action_layout.addWidget(self.convert_btn)
+    # ------------------------------------------------------------------
+    # File pickers
+    # ------------------------------------------------------------------
 
-        self.stop_btn = QPushButton("Stop")
-        self.stop_btn.setEnabled(False)
-        action_layout.addWidget(self.stop_btn)
-        action_layout.addStretch()
-
-        layout.addLayout(action_layout)
-
-        # Progress
-        self.progress = QProgressBar()
-        layout.addWidget(self.progress)
-
-        # Result
-        self.result_label = QLabel("")
-        self.result_label.setStyleSheet(f"color: {COLORS['success']};")
-        layout.addWidget(self.result_label)
-
-        layout.addStretch()
-
-    def _pick_source(self):
-        """Pick source audio file."""
+    def _pick_source(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select Source Audio", "", "Audio Files (*.wav *.mp3 *.flac *.ogg)"
+            self, "Select Source Audio", "",
+            "Audio Files (*.wav *.mp3 *.flac *.ogg *.m4a)",
         )
         if path:
             self.source_path = path
-            self.source_edit.setText(path)
+            self._src_label.setText(os.path.basename(path))
+            self._src_label.setStyleSheet(f"color: {COLORS['text']}; background: transparent;")
 
-    def _pick_reference(self):
-        """Pick reference audio file."""
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select Reference Audio", "", "Audio Files (*.wav *.mp3 *.flac *.ogg)"
-        )
+    def _pick_output_dir(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "Select Output Directory")
         if path:
-            self.reference_path = path
-            self.ref_edit.setText(path)
+            self._output_dir = path
+            self._out_label.setText(path)
 
-    def _start_conversion(self):
-        """Start conversion."""
-        if not self.source_path or not self.reference_path:
-            self.result_label.setText("Please select both source and reference files")
-            self.result_label.setStyleSheet(f"color: {COLORS['error']};")
+    # ------------------------------------------------------------------
+    # Conversion
+    # ------------------------------------------------------------------
+
+    def _get_ref_path(self) -> str | None:
+        """Return reference audio path from selected profile."""
+        idx = self._profile_combo.currentIndex()
+        if idx < 0:
+            return None
+        profile_id = self._profile_combo.itemData(idx)
+        pm = get_profile_manager()
+        ref = pm.get_default_reference(profile_id)
+        if ref and ref.get("file_path") and os.path.isfile(ref["file_path"]):
+            return ref["file_path"]
+        return None
+
+    def _start_conversion(self) -> None:
+        if not self.source_path:
+            self._phase_label.setText("Please select a source audio file.")
             return
 
-        self.converting = True
-        self.convert_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
-        self.progress.setValue(0)
-        self.result_label.setText("")
+        ref_path = self._get_ref_path()
+        if not ref_path:
+            self._phase_label.setText("Please select a profile with at least one audio file.")
+            return
 
-        model_type = "200ms" if self.model_combo.currentIndex() == 0 else "160ms"
-        steps = self.steps_slider.value()
+        self.ref_path = ref_path
+        steps = self._steps_slider.value()
 
-        self.worker = ConversionWorker(
-            self.source_path, self.reference_path, model_type, steps
+        self._convert_btn.setEnabled(False)
+        self._cancel_btn.setEnabled(True)
+        self._progress_bar.setValue(0)
+        self._result_card.hide()
+
+        self._worker = ConversionWorker(
+            source_path = self.source_path,
+            ref_path    = self.ref_path,
+            steps       = steps,
+            output_dir  = self._output_dir,
         )
-        self.worker.progress.connect(self._on_progress)
-        self.worker.finished.connect(self._on_finished)
-        self.worker.error.connect(self._on_error)
-        self.worker.start()
+        self._worker.progress.connect(self._on_progress)
+        self._worker.finished.connect(self._on_finished)
+        self._worker.error.connect(self._on_error)
+        self._worker.start()
 
-    def _on_progress(self, value):
-        """Handle progress update."""
-        self.progress.setValue(value)
+    def _cancel_conversion(self) -> None:
+        if self._worker:
+            self._worker.cancel()
+        self._convert_btn.setEnabled(True)
+        self._cancel_btn.setEnabled(False)
+        self._phase_label.setText("Cancelled.")
 
-    def _on_finished(self, output_path):
-        """Handle conversion finished."""
-        self.converting = False
-        self.convert_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
-        self.progress.setValue(100)
-        self.result_label.setText(f"Converted: {output_path}")
-        self.result_label.setStyleSheet(f"color: {COLORS['success']};")
+    def _on_progress(self, pct: int, msg: str) -> None:
+        self._progress_bar.setValue(pct)
+        self._phase_label.setText(msg)
 
-    def _on_error(self, error):
-        """Handle conversion error."""
-        self.converting = False
-        self.convert_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
-        self.result_label.setText(f"Error: {error}")
-        self.result_label.setStyleSheet(f"color: {COLORS['error']};")
+    def _on_finished(self, output_path: str) -> None:
+        self.output_path = output_path
+        self._convert_btn.setEnabled(True)
+        self._cancel_btn.setEnabled(False)
+        self._progress_bar.setValue(100)
+        self._phase_label.setText("Complete ✓")
+        self._result_path_label.setText(output_path)
+        self._result_card.show()
+        # Emit to analysis page
+        try:
+            from meanvc_gui.main import bus
+            bus.analysis_requested.emit(output_path)
+        except Exception:
+            pass
+
+    def _on_error(self, msg: str) -> None:
+        self._convert_btn.setEnabled(True)
+        self._cancel_btn.setEnabled(False)
+        self._phase_label.setText(f"Error: {msg}")
+
+    # ------------------------------------------------------------------
+    # Playback
+    # ------------------------------------------------------------------
+
+    def _toggle_play(self) -> None:
+        if self._player.playbackState() == QMediaPlayer.PlayingState:
+            self._player.pause()
+        else:
+            if self.output_path and os.path.isfile(self.output_path):
+                self._player.setSource(QUrl.fromLocalFile(self.output_path))
+            self._player.play()
+
+    def _on_playback_state(self, state) -> None:
+        if state == QMediaPlayer.PlayingState:
+            self._play_btn.setText("⏸ Pause")
+        else:
+            self._play_btn.setText("▶ Play")
+
+    def _send_to_analysis(self) -> None:
+        if self.output_path:
+            try:
+                from meanvc_gui.main import bus
+                bus.analysis_requested.emit(self.output_path)
+                bus.navigate_to.emit(3)  # Analysis page index
+            except Exception:
+                pass

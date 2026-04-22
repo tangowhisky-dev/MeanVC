@@ -1,114 +1,233 @@
-"""Settings page for device and assets management."""
+"""Settings page — device config and asset management."""
 
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+
+from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
-    QWidget,
-    QVBoxLayout,
+    QComboBox,
     QHBoxLayout,
     QLabel,
-    QComboBox,
-    QPushButton,
     QListWidget,
-    QGroupBox,
+    QListWidgetItem,
+    QMessageBox,
+    QPlainTextEdit,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
 )
-from PySide6.QtCore import Signal
 
-from meanvc_gui.components.theme import COLORS, get_button_style
+from meanvc_gui.components.theme import (
+    COLORS,
+    CardFrame,
+    PrimaryButton,
+    SecondaryLabel,
+    SectionTitle,
+)
+from meanvc_gui.core.device import get_current_device, get_device_info
+from meanvc_gui.core.engine import check_assets
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(_HERE))
+
+
+# ---------------------------------------------------------------------------
+# Download worker
+# ---------------------------------------------------------------------------
+
+class DownloadWorker(QThread):
+    """Runs download_ckpt.py in a subprocess, forwarding output lines."""
+
+    line     = Signal(str)
+    finished = Signal()
+    error    = Signal(str)
+
+    def run(self) -> None:
+        script = os.path.join(_PROJECT_ROOT, "download_ckpt.py")
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, script],
+                cwd=_PROJECT_ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            for line in proc.stdout:  # type: ignore[union-attr]
+                self.line.emit(line.rstrip())
+            proc.wait()
+            if proc.returncode != 0:
+                self.error.emit(f"download_ckpt.py exited with code {proc.returncode}")
+            else:
+                self.finished.emit()
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Settings page
+# ---------------------------------------------------------------------------
 
 class SettingsPage(QWidget):
-    """Settings and configuration page."""
+    """Device and asset settings page."""
 
     device_changed = Signal(str)
 
-    def __init__(self, app):
-        """Initialize settings page.
-
-        Args:
-            app: Main window reference
-        """
+    def __init__(self, app) -> None:
         super().__init__()
         self.app = app
-        self._setup_ui()
+        self._downloader: DownloadWorker | None = None
+        self._build()
+        self._refresh_assets()
 
-    def _setup_ui(self):
-        """Setup the UI."""
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
+    def _build(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(28, 24, 28, 24)
+        root.setSpacing(16)
 
-        # Title
-        title = QLabel("Settings")
-        title.setStyleSheet(
-            f"font-size: 24px; color: {COLORS['text']}; font-weight: 300;"
-        )
-        layout.addWidget(title)
-        layout.addSpacing(20)
+        root.addWidget(SectionTitle("Settings"))
 
-        # Device section
-        device_group = QGroupBox("Compute Device")
-        device_layout = QVBoxLayout()
+        # ---- Compute Device ----
+        device_card = CardFrame()
+        dc = QVBoxLayout(device_card)
+        dc.setContentsMargins(16, 14, 16, 14)
+        dc.setSpacing(8)
+        dc.addWidget(QLabel("Compute Device"))
 
-        self.device_combo = QComboBox()
-        self.device_combo.addItems(["cuda", "mps", "cpu"])
-
-        from meanvc_gui.core.device import get_current_device, get_device_info
-
-        current = get_current_device()
         info = get_device_info()
+        current_device = get_current_device()
 
-        self.device_combo.setCurrentText(current)
-        self.device_info = QLabel(f"{info['name']} - {info.get('memory', 'Unknown')}GB")
-        self.device_info.setStyleSheet(
-            f"color: {COLORS['text_secondary']}; font-size: 12px;"
+        device_row = QHBoxLayout()
+        self._device_combo = QComboBox()
+        self._device_combo.addItems(["auto", "cuda", "mps", "cpu"])
+        self._device_combo.setCurrentText(current_device)
+        device_row.addWidget(self._device_combo, 1)
+        apply_btn = QPushButton("Apply")
+        apply_btn.setFixedWidth(80)
+        apply_btn.clicked.connect(self._apply_device)
+        device_row.addWidget(apply_btn)
+        dc.addLayout(device_row)
+
+        dev_name = info.get("name", current_device)
+        mem = info.get("memory")
+        mem_str = f" — {mem:.1f} GB" if isinstance(mem, float) else ""
+        dc.addWidget(SecondaryLabel(f"{dev_name}{mem_str}"))
+        root.addWidget(device_card)
+
+        # ---- Model Assets ----
+        assets_card = CardFrame()
+        ac = QVBoxLayout(assets_card)
+        ac.setContentsMargins(16, 14, 16, 14)
+        ac.setSpacing(10)
+
+        assets_header = QHBoxLayout()
+        assets_header.addWidget(QLabel("Model Assets"))
+        assets_header.addStretch()
+        refresh_btn = QPushButton("↺ Refresh")
+        refresh_btn.setFixedHeight(30)
+        refresh_btn.clicked.connect(self._refresh_assets)
+        assets_header.addWidget(refresh_btn)
+        self._download_btn = PrimaryButton("Download Missing")
+        self._download_btn.setFixedHeight(30)
+        self._download_btn.clicked.connect(self._start_download)
+        assets_header.addWidget(self._download_btn)
+        ac.addLayout(assets_header)
+
+        self._assets_list = QListWidget()
+        self._assets_list.setMaximumHeight(180)
+        ac.addWidget(self._assets_list)
+
+        # Download log
+        self._log = QPlainTextEdit()
+        self._log.setReadOnly(True)
+        self._log.setMaximumHeight(120)
+        self._log.setStyleSheet(
+            f"background: {COLORS['surface_variant']}; color: {COLORS['text_muted']}; "
+            f"font-family: monospace; font-size: 11px; border: none;"
         )
+        self._log.hide()
+        ac.addWidget(self._log)
 
-        device_layout.addWidget(self.device_combo)
-        device_layout.addWidget(self.device_info)
-        device_group.setLayout(device_layout)
-        layout.addWidget(device_group)
+        root.addWidget(assets_card)
+        root.addStretch()
 
-        layout.addSpacing(15)
+    # ------------------------------------------------------------------
+    # Asset status
+    # ------------------------------------------------------------------
 
-        # Assets section
-        assets_group = QGroupBox("Model Assets")
-        assets_layout = QVBoxLayout()
+    def _refresh_assets(self) -> None:
+        self._assets_list.clear()
+        results = check_assets()
+        any_missing = False
 
-        self.assets_list = QListWidget()
-        self.assets_list.addItems(
-            [
-                "pth files - OK",
-                "onnx files - OK",
-                "hubert files - OK",
-            ]
+        for name, info in results.items():
+            exists  = info["exists"]
+            size    = f" ({info['size_mb']:.0f} MB)" if exists else ""
+            status  = "✓" if exists else "✗ missing"
+            desc    = info["description"]
+            text    = f"{status}  {desc}{size}"
+
+            item = QListWidgetItem(text)
+            item.setForeground(
+                __import__("PySide6.QtGui", fromlist=["QColor"]).QColor(
+                    COLORS["success"] if exists else COLORS["error"]
+                )
+            )
+            self._assets_list.addItem(item)
+            if not exists:
+                any_missing = True
+
+        self._download_btn.setEnabled(any_missing)
+
+    # ------------------------------------------------------------------
+    # Download
+    # ------------------------------------------------------------------
+
+    def _start_download(self) -> None:
+        if self._downloader and self._downloader.isRunning():
+            return
+        self._log.clear()
+        self._log.show()
+        self._download_btn.setEnabled(False)
+        self._download_btn.setText("Downloading…")
+
+        self._downloader = DownloadWorker()
+        self._downloader.line.connect(self._on_download_line)
+        self._downloader.finished.connect(self._on_download_done)
+        self._downloader.error.connect(self._on_download_error)
+        self._downloader.start()
+
+    def _on_download_line(self, line: str) -> None:
+        self._log.appendPlainText(line)
+        # Scroll to bottom
+        sb = self._log.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    def _on_download_done(self) -> None:
+        self._download_btn.setText("Download Missing")
+        self._log.appendPlainText("\n✓ Download complete.")
+        self._refresh_assets()
+
+    def _on_download_error(self, msg: str) -> None:
+        self._download_btn.setEnabled(True)
+        self._download_btn.setText("Download Missing")
+        self._log.appendPlainText(f"\n✗ Error: {msg}")
+        self._refresh_assets()
+        QMessageBox.warning(self, "Download Failed", msg)
+
+    # ------------------------------------------------------------------
+    # Device
+    # ------------------------------------------------------------------
+
+    def _apply_device(self) -> None:
+        device = self._device_combo.currentText()
+        import os
+        os.environ["MEANVC_DEVICE"] = device
+        self.device_changed.emit(device)
+        QMessageBox.information(
+            self, "Device Updated",
+            f"Device set to '{device}'. Restart the app for changes to take full effect.",
         )
-        assets_layout.addWidget(self.assets_list)
-
-        btn_layout = QHBoxLayout()
-        check_btn = QPushButton("Check Status")
-        check_btn.clicked.connect(self._check_assets)
-        download_btn = QPushButton("Download Missing")
-        download_btn.clicked.connect(self._download_assets)
-        download_btn.setStyleSheet(get_button_style())
-
-        btn_layout.addWidget(check_btn)
-        btn_layout.addWidget(download_btn)
-        assets_layout.addLayout(btn_layout)
-
-        assets_group.setLayout(assets_layout)
-        layout.addWidget(assets_group)
-
-        layout.addStretch()
-
-    def _check_assets(self):
-        """Check asset status."""
-        self.assets_list.clear()
-        self.assets_list.addItems(
-            [
-                "pth files - OK",
-                "onnx files - OK",
-                "hubert files - OK",
-            ]
-        )
-
-    def _download_assets(self):
-        """Download missing assets."""
-        pass

@@ -553,6 +553,14 @@ class MultiheadAttention(nn.Module):
             if k_proj_bias is None:
                 k_proj_bias = torch.zeros_like(self.q_proj.bias)
 
+            # Normalise mask types: PyTorch ≥ 2.0 warns (and will error) when
+            # key_padding_mask (bool) and attn_mask (float) have different dtypes.
+            # Convert key_padding_mask to float additive mask to match attn_mask_rel_pos.
+            kpm = key_padding_mask
+            if kpm is not None and attn_mask_rel_pos is not None:
+                if kpm.dtype == torch.bool:
+                    kpm = torch.zeros_like(kpm, dtype=attn_mask_rel_pos.dtype).masked_fill_(kpm, float("-inf"))
+
             x, attn = F.multi_head_attention_forward(
                 query,
                 key,
@@ -569,7 +577,7 @@ class MultiheadAttention(nn.Module):
                 self.out_proj.bias,
                 self.training,
                 # self.training or self.dropout_module.apply_during_inference,
-                key_padding_mask,
+                kpm,
                 need_weights,
                 attn_mask_rel_pos,
                 use_separate_proj_weight=True,

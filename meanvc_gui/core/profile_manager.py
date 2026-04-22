@@ -4,33 +4,43 @@ Handles voice profile creation, audio processing, and embedding extraction.
 """
 
 import os
+import logging
+import shutil
+import zipfile
+import json
 import numpy as np
 import torch
 import torchaudio
 from typing import Optional
 import uuid
-import aiofiles
 
 from meanvc_gui.core.profile_db import ProfileDB
 
+logger = logging.getLogger(__name__)
+
 
 def get_project_root():
-    """Get project root directory."""
-    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    """Get project root directory (three levels up from meanvc_gui/core/)."""
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+_PROJECT_ROOT = get_project_root()
+_SV_CKPT_PATH = os.path.join(_PROJECT_ROOT, "assets", "wavLM", "wavlm_large_finetune.pth")
+_SV_MAX_SECS = 10  # must match Engine.SV_MAX_SECS
 
 
 def get_audio_duration(file_path: str) -> float:
-    """Get audio file duration in seconds.
-
-    Args:
-        file_path: Path to audio file
-
-    Returns:
-        float: Duration in seconds
-    """
+    """Get audio file duration in seconds."""
+    # torchaudio.info is unavailable in some builds — use soundfile as primary,
+    # fall back to loading the full waveform if needed.
     try:
-        info = torchaudio.info(file_path)
-        return info.num_frames / info.sample_rate
+        import soundfile as sf
+        return sf.info(file_path).duration
+    except Exception:
+        pass
+    try:
+        wav, sr = torchaudio.load(file_path)
+        return wav.shape[1] / sr
     except Exception:
         return 0.0
 
@@ -38,91 +48,110 @@ def get_audio_duration(file_path: str) -> float:
 def extract_wavlm_embedding(
     audio_path: str, output_path: str, device: str = "cpu"
 ) -> bool:
-    """Extract WavLM embedding from audio file.
+    """Extract WavLM ECAPA-TDNN speaker embedding from audio file.
+
+    Uses the same init_sv_model path as engine.py and convert.py.
+    Saves a [1, 256] tensor to output_path.
 
     Args:
-        audio_path: Path to input audio
-        output_path: Path to save embedding (.pt file)
-        device: Device to run model on
+        audio_path:  Path to input audio (wav/mp3/flac).
+        output_path: Path to save embedding (.pt file).
+        device:      Torch device string.
 
     Returns:
-        bool: Success
+        bool: True on success.
     """
+    if not os.path.isfile(_SV_CKPT_PATH):
+        logger.warning(
+            f"WavLM checkpoint not found at {_SV_CKPT_PATH}. "
+            "Embedding extraction skipped. Run download_ckpt.py first."
+        )
+        return False
+
     try:
-        # Import WavLM
-        from src.wavLM.WavLM import WavLM
+        import sys
+        if _PROJECT_ROOT not in sys.path:
+            sys.path.insert(0, _PROJECT_ROOT)
+        from src.runtime.speaker_verification.verification import (
+            init_model as init_sv,
+        )
 
-        # Load WavLM model
-        wavlm_model = WavLM(
-            cfg_path="src/wavLM/configs/wavlm_base.yaml",
-            ckpt_path="src/wavLM/ckpts/wavlm_base.pt",
-        ).to(device)
-        wavlm_model.eval()
+        t0 = __import__("time").time()
+        sv_model = init_sv("wavlm_large", _SV_CKPT_PATH)
+        sv_model = sv_model.to(device)
+        sv_model.eval()
 
-        # Load audio
         waveform, sr = torchaudio.load(audio_path)
-
-        # Resample if needed
-        if sr != 16000:
-            waveform = torchaudio.functional.resample(waveform, sr, 16000)
-
-        # Ensure mono
         if waveform.shape[0] > 1:
             waveform = waveform.mean(dim=0, keepdim=True)
+        if sr != 16000:
+            waveform = torchaudio.transforms.Resample(sr, 16000)(waveform)
 
-        # Extract features
+        # Cap at SV_MAX_SECS to avoid WavLM OOM
+        max_samples = _SV_MAX_SECS * 16000
+        if waveform.shape[1] > max_samples:
+            waveform = waveform[:, :max_samples]
+
+        waveform = waveform.to(device)
         with torch.no_grad():
-            features = wavlm_model.extract_features(waveform.to(device))
-            # Use last layer, take mean over time
-            embedding = features[-1].mean(dim=1)  # [1, 1024]
+            embedding = sv_model(waveform)  # [1, 256]
 
-        # Save embedding
         torch.save(embedding.cpu(), output_path)
+        elapsed = __import__("time").time() - t0
+        logger.info(
+            f"[profile_manager] Embedding extracted: shape={list(embedding.shape)} "
+            f"in {elapsed:.2f}s → {output_path}"
+        )
         return True
 
-    except Exception as e:
-        print(f"Error extracting WavLM embedding: {e}")
+    except Exception as exc:
+        logger.error(f"[profile_manager] extract_wavlm_embedding failed: {exc}", exc_info=True)
         return False
 
 
 def extract_mel_spectrogram(audio_path: str, output_path: str) -> bool:
-    """Extract mel spectrogram from audio file.
+    """Extract mel spectrogram using MelSpectrogramFeatures (project-native).
+
+    Uses the same filterbank as the inference pipeline. Do NOT use
+    torchaudio.transforms.MelSpectrogram — different filterbank values.
 
     Args:
-        audio_path: Path to input audio
-        output_path: Path to save mel (.npy file)
+        audio_path:  Path to input audio.
+        output_path: Path to save mel (.npy file, shape [80, T]).
 
     Returns:
-        bool: Success
+        bool: True on success.
     """
     try:
-        # Load audio
+        import sys
+        if _PROJECT_ROOT not in sys.path:
+            sys.path.insert(0, _PROJECT_ROOT)
+        from src.utils.audio import MelSpectrogramFeatures
+
         waveform, sr = torchaudio.load(audio_path)
-
-        # Resample if needed
-        if sr != 16000:
-            waveform = torchaudio.functional.resample(waveform, sr, 16000)
-
-        # Ensure mono
         if waveform.shape[0] > 1:
             waveform = waveform.mean(dim=0, keepdim=True)
+        if sr != 16000:
+            waveform = torchaudio.transforms.Resample(sr, 16000)(waveform)
 
-        # Compute mel spectrogram
-        mel_transform = torchaudio.transforms.MelSpectrogram(
-            sample_rate=16000, n_fft=1024, hop_length=256, n_mels=80
-        ).eval()
-
+        mel_fn = MelSpectrogramFeatures(
+            sample_rate=16000,
+            n_fft=1024,
+            win_size=640,
+            hop_length=160,
+            n_mels=80,
+            fmin=0.0,
+            fmax=8000.0,
+            center=True,
+        )
         with torch.no_grad():
-            mel = mel_transform(waveform)
-            # Convert to log scale
-            mel = torch.log(torch.clamp(mel, min=1e-5))
+            mel = mel_fn(waveform)  # [1, 80, T]
 
-        # Save mel
-        np.save(output_path, mel.numpy())
+        np.save(output_path, mel.squeeze(0).numpy())  # [80, T]
         return True
 
-    except Exception as e:
-        print(f"Error extracting mel spectrogram: {e}")
+    except Exception as exc:
+        logger.error(f"[profile_manager] extract_mel_spectrogram failed: {exc}", exc_info=True)
         return False
 
 
@@ -353,17 +382,182 @@ class ProfileManager:
         return None
 
 
+    def export_profile(self, profile_id: str, output_zip_path: str) -> None:
+        """Export profile to a zip archive.
+
+        Archive layout:
+          manifest.json
+          audio/<file_id>_<filename>
+          embeddings/<file_id>.pt
+          prompt/<file_id>_mel.npy
+
+        Args:
+            profile_id:      Profile to export.
+            output_zip_path: Destination zip path.
+        """
+        profile = self.db.get_profile(profile_id)
+        if profile is None:
+            raise ValueError(f"Profile not found: {profile_id}")
+
+        audio_files = self.db.get_audio_files(profile_id)
+        manifest = {
+            "version": 1,
+            "profile": {
+                "name": profile["name"],
+                "description": profile.get("description", ""),
+            },
+            "audio_files": [
+                {
+                    "filename":       af["filename"],
+                    "duration":       af.get("duration", 0),
+                    "is_default":     bool(af.get("is_default")),
+                    "audio_file":     os.path.basename(af["file_path"]) if af.get("file_path") else None,
+                    "embedding_file": os.path.basename(af["embedding_path"]) if af.get("embedding_path") else None,
+                    "mel_file":       os.path.basename(af["mel_path"]) if af.get("mel_path") else None,
+                }
+                for af in audio_files
+            ],
+        }
+
+        with zipfile.ZipFile(output_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("manifest.json", json.dumps(manifest, indent=2))
+            for af in audio_files:
+                if af.get("file_path") and os.path.isfile(af["file_path"]):
+                    zf.write(af["file_path"], f"audio/{os.path.basename(af['file_path'])}")
+                if af.get("embedding_path") and os.path.isfile(af["embedding_path"]):
+                    zf.write(af["embedding_path"], f"embeddings/{os.path.basename(af['embedding_path'])}")
+                if af.get("mel_path") and os.path.isfile(af["mel_path"]):
+                    zf.write(af["mel_path"], f"prompt/{os.path.basename(af['mel_path'])}")
+
+        logger.info(f"[profile_manager] Exported {profile['name']} → {output_zip_path}")
+
+    def import_profile(self, zip_path: str) -> dict:
+        """Import a profile from a zip archive.
+
+        Creates a new profile with a fresh UUID, copies all audio and
+        embedding files to the new profile directory, and registers them
+        in the database.
+
+        Args:
+            zip_path: Path to a zip created by export_profile().
+
+        Returns:
+            The newly created profile dict.
+        """
+        import tempfile
+
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            with tempfile.TemporaryDirectory() as tmp:
+                zf.extractall(tmp)
+                manifest_path = os.path.join(tmp, "manifest.json")
+                with open(manifest_path) as f:
+                    manifest = json.load(f)
+
+                pdata = manifest["profile"]
+                profile = self.db.create_profile(pdata["name"], pdata.get("description", ""))
+                profile_id = profile["id"]
+                profile_dir = self.db.get_profile_dir(profile_id)
+                audio_dir = os.path.join(profile_dir, "audio")
+                emb_dir   = os.path.join(profile_dir, "embeddings")
+                mel_dir   = os.path.join(profile_dir, "prompt")
+                os.makedirs(audio_dir, exist_ok=True)
+                os.makedirs(emb_dir,   exist_ok=True)
+                os.makedirs(mel_dir,   exist_ok=True)
+
+                for af_info in manifest.get("audio_files", []):
+                    audio_src = os.path.join(tmp, "audio", af_info["audio_file"]) if af_info.get("audio_file") else None
+                    emb_src   = os.path.join(tmp, "embeddings", af_info["embedding_file"]) if af_info.get("embedding_file") else None
+                    mel_src   = os.path.join(tmp, "prompt", af_info["mel_file"]) if af_info.get("mel_file") else None
+
+                    audio_dst = os.path.join(audio_dir, af_info["audio_file"]) if audio_src else None
+                    emb_dst   = os.path.join(emb_dir,   af_info["embedding_file"]) if emb_src else None
+                    mel_dst   = os.path.join(mel_dir,   af_info["mel_file"]) if mel_src else None
+
+                    if audio_src and os.path.isfile(audio_src) and audio_dst:
+                        shutil.copy2(audio_src, audio_dst)
+                    if emb_src and os.path.isfile(emb_src) and emb_dst:
+                        shutil.copy2(emb_src, emb_dst)
+                    if mel_src and os.path.isfile(mel_src) and mel_dst:
+                        shutil.copy2(mel_src, mel_dst)
+
+                    self.db.add_audio_file(
+                        profile_id=profile_id,
+                        filename=af_info["filename"],
+                        file_path=audio_dst or "",
+                        duration=af_info.get("duration", 0),
+                        embedding_path=emb_dst,
+                        mel_path=mel_dst,
+                        is_default=bool(af_info.get("is_default")),
+                    )
+
+        logger.info(f"[profile_manager] Imported profile '{manifest['profile']['name']}' as {profile_id}")
+        return self.db.get_profile(profile_id)
+
+
 # Singleton instance
 _manager = None
 
 
 def get_profile_manager() -> ProfileManager:
-    """Get profile manager singleton.
-
-    Returns:
-        ProfileManager: Profile manager instance
-    """
+    """Get profile manager singleton."""
     global _manager
     if _manager is None:
         _manager = ProfileManager()
     return _manager
+
+
+# ---------------------------------------------------------------------------
+# QThread embedding worker
+# ---------------------------------------------------------------------------
+
+try:
+    from PySide6.QtCore import QThread, Signal as _Signal
+
+    class EmbeddingWorker(QThread):
+        """Background worker for audio upload + WavLM embedding extraction.
+
+        Signals:
+            progress(int):     0, 50, 100
+            finished(dict):    The created audio_file dict.
+            error(str):        Error message on failure.
+        """
+
+        progress = _Signal(int)
+        finished = _Signal(dict)
+        error    = _Signal(str)
+
+        def __init__(
+            self,
+            profile_id: str,
+            source_path: str,
+            is_default: bool = False,
+            device: str = "cpu",
+            parent=None,
+        ) -> None:
+            super().__init__(parent)
+            self._profile_id   = profile_id
+            self._source_path  = source_path
+            self._is_default   = is_default
+            self._device       = device
+
+        def run(self) -> None:
+            try:
+                self.progress.emit(0)
+                pm = get_profile_manager()
+                self.progress.emit(10)
+                audio_file = pm.add_audio(
+                    self._profile_id,
+                    self._source_path,
+                    is_default=self._is_default,
+                    device=self._device,
+                )
+                self.progress.emit(100)
+                self.finished.emit(audio_file)
+            except Exception as exc:
+                logger.error(f"[EmbeddingWorker] failed: {exc}", exc_info=True)
+                self.error.emit(str(exc))
+
+except ImportError:
+    # PySide6 not available (unit-test context)
+    EmbeddingWorker = None  # type: ignore[assignment,misc]
+

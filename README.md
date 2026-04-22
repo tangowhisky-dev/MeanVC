@@ -14,162 +14,184 @@
 
 ## ✨ Key Features
 
--   **🚀 Streaming Inference**: Real-time voice conversion with chunk-wise processing.
--   **⚡ Single-Step Generation**: Direct mapping from start to endpoint via mean flows for fast generation.
--   **🎯 Zero-Shot Capability**: Convert to any unseen target speaker without re-training.
--   **💾 Lightweight**: Significantly fewer parameters than existing methods.
--   **🔊 High Fidelity**: Superior speech quality and speaker similarity.
+- **🚀 Streaming Inference** — Real-time voice conversion with chunk-wise processing (200ms latency).
+- **⚡ Single-Step Generation** — Direct mapping via mean flows; 1–2 denoising steps suffice.
+- **🎯 Zero-Shot** — Convert to any unseen target speaker; no fine-tuning or training required.
+- **💾 Lightweight** — Significantly fewer parameters than existing methods.
+- **🖥 Desktop App** — Full PySide6 GUI with profile library, offline batch, realtime, and analysis pages.
+
+---
 
 ## 🚀 Getting Started
 
 ### 1. Environment Setup
 
-Follow the steps below to clone the repository and install the required environment.
-
 ```bash
-# Clone the repository and enter the directory
-git clone https://github.com/ASLP-lab/MeanVC.git
-cd MeanVC
-
-# Create and activate a Conda environment
+# Conda (recommended)
 conda create -n meanvc python=3.11 -y
 conda activate meanvc
+pip install -r requirements.txt
 
-# Install dependencies
+# OR uv venv
+uv venv ~/.meanvc --python 3.11
+source ~/.meanvc/bin/activate
 pip install -r requirements.txt
 ```
 
-### Device Selection
-
-By default, MeanVC automatically selects the best available device (CUDA > MPS > CPU). You can also set the device using the `MEANVC_DEVICE` environment variable:
-
-```bash
-# Use CUDA GPU
-export MEANVC_DEVICE=cuda
-
-# Use Apple Silicon GPU (MPS)
-export MEANVC_DEVICE=mps
-
-# Force CPU
-export MEANVC_DEVICE=cpu
-
-# Use specific GPU
-export MEANVC_DEVICE=cuda:1
-```
-
-Alternatively, pass `--device` argument to inference/preprocessing scripts to override the default:
-
-```bash
-python src/infer/infer_ref.py --device mps --source-path ... --reference-path ...
-```
-
 ### 2. Download Pre-trained Models
-
-Run the provided script to automatically download all necessary pre-trained models.
 
 ```bash
 python download_ckpt.py
 ```
 
-This will download the main VC model, vocoder, and asr model into the `src/ckpt/` directories.
+This downloads the following files into `assets/`:
 
-This will download the main VC model, vocoder, and asr model into the `src/ckpt/` directories.
+| File | Destination | Notes |
+|------|-------------|-------|
+| `model_200ms.safetensors` | `assets/ckpt/` | DiT checkpoint |
+| `meanvc_200ms.pt` | `assets/ckpt/` | DiT TorchScript (realtime) |
+| `vocos.pt` | `assets/ckpt/` | Vocos vocoder TorchScript |
+| `fastu2++.pt` | `assets/ckpt/` | FastU2++ ASR TorchScript |
 
-The speaker verification model (`wavlm_large_finetune.pth`) must be downloaded manually from Google Drive.  Download the file from [this link](https://drive.google.com/file/d/1-aE1NfzpRCLxA4GUxX9ITI3F9LlbtEGP/view).  Place the downloaded `wavlm_large_finetune.pth` file into the `src/runtime/speaker_verification/ckpt/` directory.
+**WavLM speaker model (manual download required):**
 
-
-### 3. Real-Time Voice Conversion
-
-This script captures audio from your microphone and converts it in real-time to the voice of a target speaker.
-
-```bash
-python src/runtime/run_rt.py --target-path "path/to/target_voice.wav"
+Download [`wavlm_large_finetune.pth`](https://drive.google.com/file/d/1-aE1NfzpRCLxA4GUxX9ITI3F9LlbtEGP/view) from Google Drive and place it at:
+```
+assets/wavLM/wavlm_large_finetune.pth
 ```
 
--   `--target-path`: Path to a clean audio file of the target speaker. This voice will be used as the conversion target. An example file is provided at `src/runtime/example/test.wav`.
+### 3. Device Selection
 
-When you run the script, you will be prompted to select your audio input (microphone) and output (speaker) devices from a list.
-
-### 4. Offline Voice Conversion
-
-For batch processing or converting pre-recorded audio files, use the offline conversion script.
+MeanVC auto-selects `CUDA → MPS → CPU`. Override with:
 
 ```bash
+export MEANVC_DEVICE=cuda   # or mps / cpu / cuda:1
+```
+
+---
+
+## 🖥 Desktop App (PySide6)
+
+### Install GUI dependencies
+
+```bash
+pip install -r meanvc_gui/requirements.txt
+```
+
+### Launch
+
+```bash
+python -m meanvc_gui.main
+```
+
+### Features
+
+| Page | Description |
+|------|-------------|
+| **Library** | Create voice profiles; upload reference audio; WavLM embedding extraction; export/import profile zip |
+| **Offline** | File-based conversion with profile picker, steps slider, output directory, progress bar, playback |
+| **Realtime** | Live microphone conversion; profile/device picker; RTF display; optional output recording |
+| **Analysis** | Speaker similarity score (ECAPA-TDNN cosine); quality metrics; bar chart visualisation |
+| **Settings** | Real asset status from disk; one-click download of missing assets; device override |
+
+### Data directory
+
+All profile audio and embeddings are stored in `data/` at the project root (gitignored):
+```
+data/
+  meanvc.db          ← SQLite profile database
+  profiles/
+    <profile_id>/
+      audio/         ← reference WAV files
+      embeddings/    ← WavLM .pt embedding files
+      prompt/        ← mel spectrogram .npy files
+```
+
+---
+
+## 💻 CLI Usage
+
+### Real-time conversion
+
+```bash
+python src/runtime/run_rt.py --target-path "path/to/reference.wav"
+```
+
+### Offline batch conversion
+
+```bash
+python convert.py \
+  --source path/to/source.wav \
+  --reference path/to/reference.wav \
+  --output path/to/output_dir/ \
+  --steps 2
+```
+
+Or use the convenience script:
+
+```bash
+# Edit paths in scripts/infer_ref.sh first
 bash scripts/infer_ref.sh
 ```
 
-Before running the script, you need to configure the following paths in `scripts/infer_ref.sh`:
-
--   `source_path`: Path to the source audio file or directory containing multiple audio files to be converted
--   `reference_path`: Path to a clean audio file of the target speaker (used as voice reference)
--   `output_dir`: Directory where converted audio files will be saved (default: `src/outputs`)
--   `steps`: Number of denoising steps (default: 2)
-
+---
 
 ## 🏋️‍♀️ Training
 
-To train the model on your own dataset, follow these steps.
-
 ### 1. Data Preprocessing
 
-First, you need to extract Mel spectrograms, content features (BN), and speaker embeddings from your audio data.
-
 ```bash
-# Set device for preprocessing (optional - defaults to auto-detect)
 export MEANVC_DEVICE=cuda
 
-# 1. Extract Mel spectrograms (10ms frame shift)
-python src/preprocess/extrace_mel_10ms.py --input_dir path/to/wavs --output_dir path/to/mels
+# Extract mel spectrograms (10ms hop)
+python src/preprocess/extrace_mel_10ms.py \
+  --input_dir path/to/wavs --output_dir path/to/mels
 
-# 2. Extract content features (160ms window)
-python src/preprocess/extract_bn_160ms.py --input_dir path/to/wavs --output_dir path/to/bns
+# Extract BN content features (200ms)
+python src/preprocess/extract_bn_200ms.py \
+  --input_dir path/to/wavs --output_dir path/to/bns
 
-# 3. Extract speaker embeddings
-python src/preprocess/extract_spk_emb_wavlm.py --input_dir path/to/wavs --output_dir path/to/xvectors
-
-# Or force specific device:
-python src/preprocess/extrace_mel_10ms.py --input_dir path/to/wavs --output_dir path/to/mels --device mps
+# Extract speaker embeddings
+python src/preprocess/extract_spk_emb_wavlm.py \
+  --input_dir path/to/wavs --output_dir path/to/xvectors
 ```
 
 ### 2. Prepare Data List
 
-Create a file list (e.g., `train.list`) for training. Each line should follow this format:
-
 ```
-# Format: utt|bn_path|mel_path|xvector_path|prompt_mel_path1|prompt_mel_path2|...
-utterance_id_001|/path/to/bns/utt001.npy|/path/to/mels/utt001.npy|/path/to/xvectors/utt001.npy|/path/to/mels/prompt01.npy
+# Format: utt|bn_path|mel_path|xvector_path|prompt_mel_path
+utt001|/path/bns/utt001.npy|/path/mels/utt001.npy|/path/xvectors/utt001.npy|/path/mels/prompt01.npy
 ```
 
-### 3. Start Training
-
-Modify the configurations in `script/train.sh` (e.g., data paths, model directory) and run the script.
+### 3. Train
 
 ```bash
-bash script/train.sh
+bash scripts/train.sh
 ```
+
+---
 
 ## 📋 TODO
 
--   [x] 🌐 **Demo website**
--   [x] 📝 **Paper release**
--   [x] 🤗 **HuggingFace model release**
--   [x] 🔓 **Release inference code**
--   [x] 🔓 **Release training code**
--   [ ] 📱 **Android deployment package**
+- [x] 🌐 Demo website
+- [x] 📝 Paper release
+- [x] 🤗 HuggingFace model release
+- [x] 🔓 Inference code
+- [x] 🔓 Training code
+- [x] 🖥 Desktop GUI (PySide6)
+- [ ] 📱 Android deployment package
+
+---
 
 ## 📜 License & Disclaimer
 
-MeanVC is released under the Apache License 2.0. This open-source license allows you to freely use, modify, and distribute the model, as long as you include the appropriate copyright notice and disclaimer.
-
-MeanVC is designed for research and legitimate applications in voice conversion technology. Users must obtain proper consent from individuals whose voices are being converted or used as references. We strongly discourage any malicious use including impersonation, fraud, or creating misleading audio content. Users are solely responsible for ensuring their use cases comply with ethical standards and legal requirements.
+MeanVC is released under the Apache License 2.0. Users must obtain proper consent from individuals whose voices are used as references. The authors strongly discourage any malicious use including impersonation, fraud, or misleading audio content. Users are solely responsible for compliance with ethical and legal requirements.
 
 ## ❤️ Acknowledgments
-Our work is built upon the following open-source projects [MeanFlow](https://github.com/haidog-yaqub/MeanFlow), [F5-TTS](https://github.com/SWivid/F5-TTS) and [Vocos](https://github.com/gemelo-ai/vocos). Thanks to the authors for their great work, and if you have any questions, you can first check them on their respective issues.
 
+Built upon [MeanFlow](https://github.com/haidog-yaqub/MeanFlow), [F5-TTS](https://github.com/SWivid/F5-TTS), and [Vocos](https://github.com/gemelo-ai/vocos).
 
 ## 📄 Citation
-
-If you find our work helpful, please cite our paper:
 
 ```bibtex
 @article{ma2025meanvc,
@@ -182,15 +204,11 @@ If you find our work helpful, please cite our paper:
 
 ## 📧 Contact
 
-If you are interested in leaving a message to our research team, feel free to email guobin.ma@mail.nwpu.edu.cn
-
-You’re welcome to join our WeChat group for technical discussions, updates.
-
+guobin.ma@mail.nwpu.edu.cn
 
 <p align="center">
     <img src="figs/meanvc_QR.png" width="300"/>
 </p>
-
 
 <p align="center">
     <img src="figs/npu@aslp.jpeg" height="120" style="margin-right: 20px;"/>

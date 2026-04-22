@@ -1,564 +1,542 @@
-"""Modern Library Page for voice profile management."""
+"""Library page — voice profile management.
 
+Full CRUD: create, rename, delete profiles; upload audio with WavLM
+embedding extraction; set default reference; export/import zip.
+"""
+
+from __future__ import annotations
+
+import os
+
+from PySide6.QtCore import Qt, QSize, Signal
 from PySide6.QtWidgets import (
-    QWidget,
-    QVBoxLayout,
+    QFileDialog,
+    QFrame,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
-    QPushButton,
     QListWidget,
     QListWidgetItem,
-    QGroupBox,
-    QTableWidget,
-    QTableWidgetItem,
-    QFileDialog,
-    QInputDialog,
     QMessageBox,
-    QFrame,
+    QPushButton,
     QScrollArea,
     QSizePolicy,
+    QVBoxLayout,
+    QWidget,
 )
-from PySide6.QtCore import Qt, QSize, Signal
-from PySide6.QtGui import QLinearGradient, QBrush, QColor
 
-from meanvc_gui.components.modern_theme import _DARK_COLORS
-from meanvc_gui.core.profile_manager import get_profile_manager
+from meanvc_gui.components.theme import (
+    COLORS,
+    CardFrame,
+    DangerButton,
+    PrimaryButton,
+    SecondaryButton,
+    SecondaryLabel,
+    SectionTitle,
+    StatusBadge,
+)
+from meanvc_gui.core.device import get_current_device
+from meanvc_gui.core.profile_manager import EmbeddingWorker, get_profile_manager
 
+
+# ---------------------------------------------------------------------------
+# Profile card widget
+# ---------------------------------------------------------------------------
 
 class ProfileCard(QFrame):
-    """Modern profile card widget."""
+    """Clickable card showing profile summary."""
 
     selected = Signal(str)
 
-    def __init__(self, profile: dict, parent=None):
+    def __init__(self, profile: dict, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.profile = profile
         self._selected = False
-        self._setup_ui()
+        self._build()
 
-    def _setup_ui(self):
-        colors = _DARK_COLORS
-
-        self.setFixedHeight(100)
+    def _build(self) -> None:
+        self.setFixedHeight(88)
         self.setCursor(Qt.PointingHandCursor)
+        self._apply_style(False)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 12, 16, 12)
-        layout.setSpacing(8)
+        layout.setContentsMargins(16, 10, 16, 10)
+        layout.setSpacing(6)
 
-        # Name row
-        name_row = QHBoxLayout()
-
-        name_label = QLabel(self.profile.get("name", "Untitled"))
-        name_label.setStyleSheet(f"""
-            font-size: 15px;
-            font-weight: 600;
-            color: {colors["text_primary"]};
-        """)
-        name_row.addWidget(name_label)
-
-        name_row.addStretch()
-
-        # Duration badge
+        # Row 1: name + duration badge
+        row1 = QHBoxLayout()
+        name = QLabel(self.profile.get("name", "Untitled"))
+        name.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {COLORS['text']}; background: transparent;")
+        row1.addWidget(name)
+        row1.addStretch()
         duration = self.profile.get("total_audio_duration", 0)
-        duration_label = QLabel(f"🕐 {duration:.0f}s")
-        duration_label.setStyleSheet(f"""
-            font-size: 12px;
-            color: {colors["text_secondary"]};
-            background: {colors["surface"]};
-            padding: 4px 8px;
-            border-radius: 4px;
-        """)
-        name_row.addWidget(duration_label)
+        dur_lbl = QLabel(f"🕐 {duration:.0f}s")
+        dur_lbl.setStyleSheet(
+            f"font-size: 11px; color: {COLORS['text_secondary']}; "
+            f"background: {COLORS['surface_variant']}; "
+            "border-radius: 4px; padding: 2px 6px;"
+        )
+        row1.addWidget(dur_lbl)
+        layout.addLayout(row1)
 
-        layout.addLayout(name_row)
-
-        # Stats row
-        stats_row = QHBoxLayout()
-
-        files = self.profile.get("num_audio_files", 0)
-        files_label = QLabel(f"📁 {files} audio files")
-        files_label.setStyleSheet(f"""
-            font-size: 12px;
-            color: {colors["text_secondary"]};
-        """)
-        stats_row.addWidget(files_label)
-
-        stats_row.addStretch()
-
-        # Created date
+        # Row 2: file count + created date
+        row2 = QHBoxLayout()
+        n_files = self.profile.get("num_audio_files", 0)
+        files_lbl = SecondaryLabel(f"📁 {n_files} file{'s' if n_files != 1 else ''}")
+        row2.addWidget(files_lbl)
+        row2.addStretch()
         created = self.profile.get("created_at", "")[:10]
-        date_label = QLabel(f"📅 {created}")
-        date_label.setStyleSheet(f"""
-            font-size: 12px;
-            color: {colors["text_tertiary"]};
-        """)
-        stats_row.addWidget(date_label)
+        date_lbl = SecondaryLabel(created)
+        row2.addWidget(date_lbl)
+        layout.addLayout(row2)
 
-        layout.addLayout(stats_row)
-
-        self.setStyleSheet(f"""
-            QFrame {{
-                background: {colors["surface_card"]};
-                border: 1px solid {colors["border"]};
-                border-radius: 12px;
-            }}
-        """)
-
-    def set_selected(self, selected: bool):
-        self._selected = selected
-        colors = _DARK_COLORS
-
+    def _apply_style(self, selected: bool) -> None:
         if selected:
             self.setStyleSheet(f"""
                 QFrame {{
-                    background: {colors["primary_container"]};
-                    border: 1px solid {colors["primary"]};
-                    border-radius: 12px;
+                    background: rgba(132, 220, 198, 0.15);
+                    border: 1px solid {COLORS['primary']};
+                    border-radius: 10px;
                 }}
             """)
         else:
             self.setStyleSheet(f"""
                 QFrame {{
-                    background: {colors["surface_card"]};
-                    border: 1px solid {colors["border"]};
-                    border-radius: 12px;
+                    background: {COLORS['surface']};
+                    border: 1px solid {COLORS['border']};
+                    border-radius: 10px;
                 }}
             """)
 
-    def mousePressEvent(self, event):
+    def set_selected(self, selected: bool) -> None:
+        self._selected = selected
+        self._apply_style(selected)
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
         self.selected.emit(self.profile["id"])
         super().mousePressEvent(event)
 
 
-class LibraryPage(QWidget):
-    """Modern voice profile library page."""
+# ---------------------------------------------------------------------------
+# Library page
+# ---------------------------------------------------------------------------
 
-    def __init__(self, app):
+class LibraryPage(QWidget):
+    """Voice profile library page."""
+
+    def __init__(self, app) -> None:
         super().__init__()
         self.app = app
-        self.profile_manager = get_profile_manager()
-        self.current_profile = None
-        self._setup_ui()
+        self.pm = get_profile_manager()
+        self.current_profile: dict | None = None
+        self._active_workers: list[EmbeddingWorker] = []
+        self._build()
         self._load_profiles()
 
-    def _setup_ui(self):
-        colors = _DARK_COLORS
+    # ------------------------------------------------------------------
+    # UI construction
+    # ------------------------------------------------------------------
 
-        self.setStyleSheet(f"background: {colors['bg_primary']};")
+    def _build(self) -> None:
+        # ── Standard outer shell (matches every other page) ────────────
+        root = QVBoxLayout(self)
+        root.setContentsMargins(28, 24, 28, 24)
+        root.setSpacing(16)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(32, 24, 32, 24)
-        layout.setSpacing(24)
-
-        # Header section
-        header = QHBoxLayout()
-
-        title = QLabel("Voice Profiles")
-        title.setStyleSheet(f"""
-            font-size: 28px;
-            font-weight: 700;
-            color: {colors["text_primary"]};
-        """)
-        header.addWidget(title)
-
-        header.addStretch()
-
-        # Add button
-        add_btn = QPushButton("+ New Profile")
-        add_btn.setProperty("primary", True)
-        add_btn.setFixedHeight(40)
-        add_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #22d3ee;
-                color: #0d0d0f;
-                border: none;
-                padding: 10px 20px;
-                border-radius: 8px;
-                font-weight: 600;
-                font-size: 14px;
-            }
-            QPushButton:hover {
-                background-color: #06b6d4;
-            }
-        """)
+        # Page title row — same as Offline/Realtime/Analysis/Settings
+        title_row = QHBoxLayout()
+        title_row.addWidget(SectionTitle("Voice Profiles"))
+        title_row.addStretch()
+        import_btn = QPushButton("Import")
+        import_btn.setFixedHeight(32)
+        import_btn.clicked.connect(self._import_profile)
+        title_row.addWidget(import_btn)
+        add_btn = PrimaryButton("+ New")
+        add_btn.setFixedHeight(32)
         add_btn.clicked.connect(self._new_profile)
-        header.addWidget(add_btn)
+        title_row.addWidget(add_btn)
+        root.addLayout(title_row)
 
-        layout.addLayout(header)
+        # ── Body: left sidebar + right detail ──────────────────────────
+        body = QHBoxLayout()
+        body.setSpacing(16)
 
-        # Content area
-        content = QHBoxLayout()
-        content.setSpacing(24)
+        # ---- Left sidebar: scrollable profile card list ----
+        sidebar = CardFrame()
+        sidebar.setFixedWidth(280)
+        sv = QVBoxLayout(sidebar)
+        sv.setContentsMargins(12, 12, 12, 12)
+        sv.setSpacing(8)
 
-        # Left panel - Profiles list
-        left_panel = QFrame()
-        left_layout = QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(12)
-
-        # Scroll area for profiles
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
 
-        self.profiles_container = QWidget()
-        self.profiles_layout = QVBoxLayout(self.profiles_container)
-        self.profiles_layout.setContentsMargins(0, 0, 0, 0)
-        self.profiles_layout.setSpacing(12)
+        self._cards_container = QWidget()
+        self._cards_container.setStyleSheet("background: transparent;")
+        self._cards_layout = QVBoxLayout(self._cards_container)
+        self._cards_layout.setContentsMargins(0, 0, 0, 0)
+        self._cards_layout.setSpacing(8)
+        self._cards_layout.addStretch()
 
-        scroll.setWidget(self.profiles_container)
+        scroll.setWidget(self._cards_container)
+        sv.addWidget(scroll, 1)
+        body.addWidget(sidebar)
 
-        # Apply scroll styling
-        scroll.setStyleSheet(f"""
-            QScrollArea {{
-                background: transparent;
-                border: none;
-            }}
-            QScrollBar:vertical {{
-                width: 6px;
-                background: transparent;
-            }}
-            QScrollBar::handle:vertical {{
-                background: {colors["border"]};
-                border-radius: 3px;
-                margin: 20px 0;
-            }}
-        """)
+        # ---- Right detail area ----
+        right = QVBoxLayout()
+        right.setSpacing(16)
 
-        left_layout.addWidget(scroll)
-        left_panel.setFixedWidth(360)
+        # Profile detail card
+        detail_card = CardFrame()
+        dc = QVBoxLayout(detail_card)
+        dc.setContentsMargins(16, 14, 16, 14)
+        dc.setSpacing(12)
 
-        content.addWidget(left_panel)
+        detail_header = QHBoxLayout()
+        detail_header.addWidget(QLabel("Profile Details"))
+        detail_header.addStretch()
+        self._export_btn = SecondaryButton("Export")
+        self._export_btn.setFixedHeight(30)
+        self._export_btn.clicked.connect(self._export_profile)
+        self._export_btn.setEnabled(False)
+        detail_header.addWidget(self._export_btn)
+        self._rename_btn = SecondaryButton("Rename")
+        self._rename_btn.setFixedHeight(30)
+        self._rename_btn.clicked.connect(self._rename_profile)
+        self._rename_btn.setEnabled(False)
+        detail_header.addWidget(self._rename_btn)
+        self._delete_btn = DangerButton("Delete")
+        self._delete_btn.setFixedHeight(30)
+        self._delete_btn.clicked.connect(self._delete_profile)
+        self._delete_btn.setEnabled(False)
+        detail_header.addWidget(self._delete_btn)
+        dc.addLayout(detail_header)
 
-        # Right panel - Details
-        self.details_panel = QFrame()
-        self.details_panel.setFixedWidth(400)
-        details_layout = QVBoxLayout(self.details_panel)
-        details_layout.setContentsMargins(0, 0, 0, 0)
-        details_layout.setSpacing(20)
+        self._detail_rows = QVBoxLayout()
+        self._detail_rows.setSpacing(8)
+        dc.addLayout(self._detail_rows)
 
-        # Profile details card
-        details_card = QFrame()
-        details_card.setStyleSheet(f"""
-            QFrame {{
-                background: {colors["surface_card"]};
-                border: 1px solid {colors["border"]};
-                border-radius: 16px;
-            }}
-        """)
-        card_layout = QVBoxLayout(details_card)
-        card_layout.setContentsMargins(24, 24, 24, 24)
-        card_layout.setSpacing(16)
-
-        # Card header
-        card_header = QHBoxLayout()
-        card_title = QLabel("Profile Details")
-        card_title.setStyleSheet(f"""
-            font-size: 16px;
-            font-weight: 600;
-            color: {colors["text_primary"]};
-        """)
-        card_header.addWidget(card_title)
-        card_header.addStretch()
-        card_layout.addLayout(card_header)
-
-        # Details info
-        self.details_info = QVBoxLayout()
-        self.details_info.setSpacing(12)
-        card_layout.addLayout(self.details_info)
-
-        details_layout.addWidget(details_card)
+        self._use_btn = PrimaryButton("Use for Conversion")
+        self._use_btn.setEnabled(False)
+        self._use_btn.clicked.connect(self._use_profile)
+        dc.addWidget(self._use_btn)
+        right.addWidget(detail_card)
 
         # Audio files card
-        audio_card = QFrame()
-        audio_card.setStyleSheet(f"""
-            QFrame {{
-                background: {colors["surface_card"]};
-                border: 1px solid {colors["border"]};
-                border-radius: 16px;
-            }}
-        """)
-        audio_layout = QVBoxLayout(audio_card)
-        audio_layout.setContentsMargins(24, 24, 24, 24)
-        audio_layout.setSpacing(16)
+        audio_card = CardFrame()
+        ac = QVBoxLayout(audio_card)
+        ac.setContentsMargins(16, 14, 16, 14)
+        ac.setSpacing(12)
 
         audio_header = QHBoxLayout()
         audio_title = QLabel("Audio Files")
-        audio_title.setStyleSheet(f"""
-            font-size: 16px;
-            font-weight: 600;
-            color: {colors["text_primary"]};
-        """)
+        audio_title.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {COLORS['text']}; background: transparent;")
         audio_header.addWidget(audio_title)
         audio_header.addStretch()
+        self._add_audio_btn = PrimaryButton("+ Add Audio")
+        self._add_audio_btn.setFixedHeight(30)
+        self._add_audio_btn.setEnabled(False)
+        self._add_audio_btn.clicked.connect(self._add_audio)
+        audio_header.addWidget(self._add_audio_btn)
+        ac.addLayout(audio_header)
 
-        add_audio_btn = QPushButton("+ Add")
-        add_audio_btn.setFixedSize(70, 32)
-        add_audio_btn.clicked.connect(self._add_audio)
-        audio_header.addWidget(add_audio_btn)
+        self._audio_list = QListWidget()
+        self._audio_list.setMinimumHeight(160)
+        self._audio_list.itemDoubleClicked.connect(self._on_audio_double_click)
+        ac.addWidget(self._audio_list)
 
-        audio_layout.addLayout(audio_header)
+        # Per-file action buttons
+        file_btns = QHBoxLayout()
+        self._set_default_btn = SecondaryButton("Set as Default ★")
+        self._set_default_btn.setEnabled(False)
+        self._set_default_btn.clicked.connect(self._set_default)
+        file_btns.addWidget(self._set_default_btn)
+        self._remove_audio_btn = DangerButton("Remove File")
+        self._remove_audio_btn.setEnabled(False)
+        self._remove_audio_btn.clicked.connect(self._remove_audio)
+        file_btns.addWidget(self._remove_audio_btn)
+        file_btns.addStretch()
+        ac.addLayout(file_btns)
+        right.addWidget(audio_card)
 
-        # Audio list
-        self.audio_list = QListWidget()
-        self.audio_list.setStyleSheet(f"""
-            QListWidget {{
-                background: transparent;
-                border: none;
-            }}
-            QListWidget::item {{
-                background: {colors["surface"]};
-                color: {colors["text_primary"]};
-                padding: 12px;
-                border-radius: 8px;
-                margin-bottom: 8px;
-            }}
-        """)
-        audio_layout.addWidget(self.audio_list)
+        right.addStretch()
+        body.addLayout(right, 1)
+        root.addLayout(body, 1)
 
-        details_layout.addWidget(audio_card)
+        # Enable per-file buttons when selection changes
+        self._audio_list.itemSelectionChanged.connect(self._on_audio_selection)
 
-        # Actions
-        actions = QHBoxLayout()
-        actions.setSpacing(12)
+    # ------------------------------------------------------------------
+    # Profile list management
+    # ------------------------------------------------------------------
 
-        use_btn = QPushButton("Use for Conversion")
-        use_btn.setProperty("primary", True)
-        use_btn.setFixedHeight(44)
-        use_btn.clicked.connect(self._use_profile)
-        actions.addWidget(use_btn)
-
-        delete_btn = QPushButton("Delete")
-        delete_btn.setFixedHeight(44)
-        delete_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: {colors["error_bg"]};
-                color: {colors["error"]};
-                border: 1px solid {colors["error"]};
-            }}
-        """)
-        delete_btn.clicked.connect(self._delete_profile)
-        actions.addWidget(delete_btn)
-
-        actions.addStretch()
-
-        details_layout.addLayout(actions)
-
-        content.addWidget(self.details_panel)
-
-        layout.addLayout(content)
-        layout.addStretch()
-
-    def _load_profiles(self):
-        """Load profiles from database."""
-        # Clear existing
-        while self.profiles_layout.count():
-            item = self.profiles_layout.takeAt(0)
+    def _load_profiles(self) -> None:
+        """Reload profile cards from DB."""
+        # Remove old cards (except the trailing stretch)
+        while self._cards_layout.count() > 1:
+            item = self._cards_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
 
-        profiles = self.profile_manager.list_profiles()
-
-        for profile in profiles:
-            card = ProfileCard(profile)
+        profiles = self.pm.list_profiles()
+        for p in profiles:
+            card = ProfileCard(p)
             card.selected.connect(self._on_profile_selected)
-            self.profiles_layout.addWidget(card)
+            self._cards_layout.insertWidget(self._cards_layout.count() - 1, card)
 
         if profiles:
+            if self.current_profile:
+                # Re-select same profile if it still exists
+                ids = [p["id"] for p in profiles]
+                if self.current_profile["id"] in ids:
+                    self._on_profile_selected(self.current_profile["id"])
+                    return
             self._on_profile_selected(profiles[0]["id"])
         else:
             self.current_profile = None
-            if hasattr(self, "audio_list"):
-                self._show_details_placeholder()
+            self._refresh_detail()
+            self._refresh_audio_list()
 
-    def _on_profile_selected(self, profile_id: str):
-        """Handle profile selection."""
-        # Update card selection
-        for i in range(self.profiles_layout.count()):
-            widget = self.profiles_layout.itemAt(i).widget()
-            if isinstance(widget, ProfileCard):
-                widget.set_selected(widget.profile["id"] == profile_id)
+    def _on_profile_selected(self, profile_id: str) -> None:
+        # Update card highlight
+        for i in range(self._cards_layout.count()):
+            w = self._cards_layout.itemAt(i).widget()
+            if isinstance(w, ProfileCard):
+                w.set_selected(w.profile["id"] == profile_id)
 
-        self.current_profile = self.profile_manager.get_profile(profile_id)
-        self._update_details()
-        self._update_audio_list()
+        self.current_profile = self.pm.get_profile(profile_id)
+        self._refresh_detail()
+        self._refresh_audio_list()
 
-    def _update_details(self):
-        """Update profile details."""
-        colors = _DARK_COLORS
+    # ------------------------------------------------------------------
+    # Detail panel
+    # ------------------------------------------------------------------
 
-        # Clear existing
-        while self.details_info.count():
-            item = self.details_info.takeAt(0)
+    def _refresh_detail(self) -> None:
+        # Clear rows — must handle both widget items and layout items
+        while self._detail_rows.count():
+            item = self._detail_rows.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+            elif item.layout():
+                # Clear child widgets from the sub-layout then delete it
+                sub = item.layout()
+                while sub.count():
+                    child = sub.takeAt(0)
+                    if child.widget():
+                        child.widget().deleteLater()
+                sub.deleteLater()
 
-        if not self.current_profile:
-            self._show_details_placeholder()
+        has = self.current_profile is not None
+        self._export_btn.setEnabled(has)
+        self._rename_btn.setEnabled(has)
+        self._delete_btn.setEnabled(has)
+        self._use_btn.setEnabled(has)
+        self._add_audio_btn.setEnabled(has)
+
+        if not has:
+            self._detail_rows.addWidget(SecondaryLabel("Select a profile to view details."))
             return
 
-        profile = self.current_profile
+        p = self.current_profile
+        for label, value in [
+            ("Name",       p.get("name", "")),
+            ("Files",      str(p.get("num_audio_files", 0))),
+            ("Duration",   f"{p.get('total_audio_duration', 0):.1f}s"),
+            ("Created",    p.get("created_at", "")[:19].replace("T", " ")),
+        ]:
+            row = QHBoxLayout()
+            lbl = SecondaryLabel(label)
+            lbl.setFixedWidth(80)
+            row.addWidget(lbl)
+            val = QLabel(value)
+            val.setStyleSheet(f"font-size: 13px; color: {COLORS['text']}; background: transparent;")
+            row.addWidget(val)
+            row.addStretch()
+            self._detail_rows.addLayout(row)
 
-        # Name
-        self._add_detail_row("Name", profile.get("name", "Untitled"))
+    # ------------------------------------------------------------------
+    # Audio files panel
+    # ------------------------------------------------------------------
 
-        # Description
-        desc = profile.get("description", "")
-        if desc:
-            self._add_detail_row("Description", desc)
-
-        # Audio files
-        self._add_detail_row("Audio Files", str(profile.get("num_audio_files", 0)))
-
-        # Duration
-        duration = profile.get("total_audio_duration", 0)
-        self._add_detail_row("Total Duration", f"{duration:.1f} seconds")
-
-        # Created
-        created = profile.get("created_at", "")[:19].replace("T", " ")
-        self._add_detail_row("Created", created)
-
-    def _add_detail_row(self, label: str, value: str):
-        """Add a detail row."""
-        colors = _DARK_COLORS
-
-        row = QHBoxLayout()
-        row.setSpacing(12)
-
-        lbl = QLabel(label)
-        lbl.setStyleSheet(f"""
-            font-size: 13px;
-            color: {colors["text_secondary"]};
-        """)
-        lbl.setFixedWidth(100)
-        row.addWidget(lbl)
-
-        val = QLabel(value)
-        val.setStyleSheet(f"""
-            font-size: 13px;
-            color: {colors["text_primary"]};
-            font-weight: 500;
-        """)
-        row.addWidget(val)
-
-        row.addStretch()
-
-        self.details_info.addLayout(row)
-
-    def _show_details_placeholder(self):
-        """Show placeholder when no profile selected."""
-        colors = _DARK_COLORS
-
-        while self.details_info.count():
-            item = self.details_info.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-
-        placeholder = QLabel("Select a profile to view details")
-        placeholder.setStyleSheet(f"""
-            font-size: 14px;
-            color: {colors["text_tertiary"]};
-            padding: 40px;
-        """)
-        self.details_info.addWidget(placeholder)
-
-        self.audio_list.clear()
-
-    def _update_audio_list(self):
-        """Update audio files list."""
-        colors = _DARK_COLORS
-
-        self.audio_list.clear()
-
+    def _refresh_audio_list(self) -> None:
+        self._audio_list.clear()
         if not self.current_profile:
             return
 
-        for audio in self.current_profile.get("audio_files", []):
-            filename = audio.get("filename", "Unknown")
-            duration = audio.get("duration", 0)
-            default_mark = " ★" if audio.get("is_default") else ""
+        for af in self.current_profile.get("audio_files", []):
+            name     = af.get("filename", "unknown")
+            dur      = af.get("duration", 0)
+            default  = " ★" if af.get("is_default") else ""
+            has_emb  = bool(af.get("embedding_path") and os.path.isfile(af["embedding_path"]))
+            status   = "ready" if has_emb else "pending"
 
-            item = QListWidgetItem(f"🎵 {filename} ({duration:.1f}s){default_mark}")
-            item.setData(Qt.UserRole, audio["id"])
-            self.audio_list.addItem(item)
+            item = QListWidgetItem(f"🎵  {name}  ({dur:.1f}s){default}   [{status}]")
+            item.setData(Qt.UserRole, af["id"])
+            item.setForeground(
+                __import__("PySide6.QtGui", fromlist=["QColor"]).QColor(
+                    COLORS["success"] if has_emb else COLORS["text_muted"]
+                )
+            )
+            self._audio_list.addItem(item)
 
-    def _new_profile(self):
-        """Create new profile."""
-        name, ok = QInputDialog.getText(self, "New Profile", "Profile Name:")
+    def _on_audio_selection(self) -> None:
+        has = len(self._audio_list.selectedItems()) > 0
+        self._set_default_btn.setEnabled(has)
+        self._remove_audio_btn.setEnabled(has)
+
+    def _on_audio_double_click(self, item: QListWidgetItem) -> None:
+        """Double-click on an audio item → set as default."""
+        file_id = item.data(Qt.UserRole)
+        if file_id:
+            self.pm.set_default_audio(file_id)
+            self.current_profile = self.pm.get_profile(self.current_profile["id"])
+            self._refresh_audio_list()
+
+    # ------------------------------------------------------------------
+    # Actions
+    # ------------------------------------------------------------------
+
+    def _new_profile(self) -> None:
+        name, ok = QInputDialog.getText(self, "New Profile", "Profile name:")
         if not ok or not name.strip():
             return
-
-        description, _ = QInputDialog.getText(
-            self, "New Profile", "Description (optional):"
-        )
-        if not description:
-            description = ""
-
-        profile = self.profile_manager.create_profile(name.strip(), description)
+        desc, _ = QInputDialog.getText(self, "New Profile", "Description (optional):")
+        profile = self.pm.create_profile(name.strip(), desc.strip())
         self._load_profiles()
-
-        # Select new profile
         self._on_profile_selected(profile["id"])
 
-    def _add_audio(self):
-        """Add audio to current profile."""
+    def _rename_profile(self) -> None:
         if not self.current_profile:
-            QMessageBox.warning(self, "No Profile", "Please select a profile first.")
             return
+        name, ok = QInputDialog.getText(
+            self, "Rename Profile", "New name:",
+            text=self.current_profile["name"],
+        )
+        if not ok or not name.strip():
+            return
+        self.pm.update_profile(self.current_profile["id"], name=name.strip())
+        self._load_profiles()
 
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select Audio File", "", "Audio Files (*.wav *.mp3 *.flac *.ogg)"
+    def _delete_profile(self) -> None:
+        if not self.current_profile:
+            return
+        reply = QMessageBox.question(
+            self, "Delete Profile",
+            f"Delete '{self.current_profile['name']}'? This cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            self.pm.delete_profile(self.current_profile["id"])
+            self.current_profile = None
+            self._load_profiles()
+
+    def _use_profile(self) -> None:
+        if not self.current_profile:
+            return
+        self.app.current_profile = self.current_profile
+        # Emit cross-page signal
+        from meanvc_gui.main import bus
+        bus.profile_selected.emit(self.current_profile)
+        QMessageBox.information(
+            self, "Profile Set",
+            f"'{self.current_profile['name']}' is now the active profile for conversion.",
         )
 
+    def _add_audio(self) -> None:
+        if not self.current_profile:
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Audio File", "",
+            "Audio Files (*.wav *.mp3 *.flac *.ogg *.m4a)",
+        )
         if not path:
             return
 
-        try:
-            from meanvc_gui.core.device import get_current_device
+        is_default = self.current_profile.get("num_audio_files", 0) == 0
 
-            device = get_current_device()
+        worker = EmbeddingWorker(
+            profile_id=self.current_profile["id"],
+            source_path=path,
+            is_default=is_default,
+            device=get_current_device(),
+        )
+        self._active_workers.append(worker)
+        self._add_audio_btn.setEnabled(False)
+        self._add_audio_btn.setText("Extracting…")
 
-            audio = self.profile_manager.add_audio(
-                self.current_profile["id"],
-                path,
-                is_default=self.current_profile.get("num_audio_files", 0) == 0,
-                device=device,
-            )
+        worker.finished.connect(self._on_embed_done)
+        worker.error.connect(self._on_embed_error)
+        worker.start()
 
-            # Reload
-            self.current_profile = self.profile_manager.get_profile(
-                self.current_profile["id"]
-            )
-            self._update_details()
-            self._update_audio_list()
+    def _on_embed_done(self, audio_file: dict) -> None:
+        self._add_audio_btn.setEnabled(True)
+        self._add_audio_btn.setText("+ Add Audio")
+        self.current_profile = self.pm.get_profile(self.current_profile["id"])
+        self._refresh_detail()
+        self._refresh_audio_list()
+        # Reload cards to update stats
+        self._load_profiles()
 
-            QMessageBox.information(
-                self, "Success", f"Audio added: {audio['filename']}"
-            )
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to add audio: {e}")
+    def _on_embed_error(self, msg: str) -> None:
+        self._add_audio_btn.setEnabled(True)
+        self._add_audio_btn.setText("+ Add Audio")
+        QMessageBox.warning(self, "Embedding Failed", f"Could not process audio:\n{msg}")
 
-    def _use_profile(self):
-        """Use selected profile for VC."""
-        if not self.current_profile:
-            QMessageBox.warning(self, "No Profile", "Please select a profile first.")
+    def _set_default(self) -> None:
+        items = self._audio_list.selectedItems()
+        if not items:
             return
+        file_id = items[0].data(Qt.UserRole)
+        self.pm.set_default_audio(file_id)
+        self.current_profile = self.pm.get_profile(self.current_profile["id"])
+        self._refresh_audio_list()
 
-        self.app.current_profile = self.current_profile
-
-    def _delete_profile(self):
-        """Delete selected profile."""
-        if not self.current_profile:
+    def _remove_audio(self) -> None:
+        items = self._audio_list.selectedItems()
+        if not items:
             return
-
+        file_id = items[0].data(Qt.UserRole)
         reply = QMessageBox.question(
-            self,
-            "Delete Profile",
-            f"Delete profile '{self.current_profile['name']}'?",
+            self, "Remove Audio",
+            "Remove this audio file from the profile?",
             QMessageBox.Yes | QMessageBox.No,
         )
-
         if reply == QMessageBox.Yes:
-            self.profile_manager.delete_profile(self.current_profile["id"])
+            self.pm.delete_audio(file_id)
+            self.current_profile = self.pm.get_profile(self.current_profile["id"])
+            self._refresh_detail()
+            self._refresh_audio_list()
             self._load_profiles()
+
+    def _export_profile(self) -> None:
+        if not self.current_profile:
+            return
+        name = self.current_profile["name"].replace(" ", "_")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Profile", f"{name}.zip",
+            "Zip Archives (*.zip)",
+        )
+        if not path:
+            return
+        try:
+            self.pm.export_profile(self.current_profile["id"], path)
+            QMessageBox.information(self, "Exported", f"Profile exported to:\n{path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Export Failed", str(exc))
+
+    def _import_profile(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import Profile", "", "Zip Archives (*.zip)"
+        )
+        if not path:
+            return
+        try:
+            profile = self.pm.import_profile(path)
+            self._load_profiles()
+            self._on_profile_selected(profile["id"])
+            QMessageBox.information(self, "Imported", f"Profile '{profile['name']}' imported.")
+        except Exception as exc:
+            QMessageBox.critical(self, "Import Failed", str(exc))

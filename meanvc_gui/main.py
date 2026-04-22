@@ -1,20 +1,27 @@
-"""Main MeanVC GUI Application."""
+"""MeanVC Desktop Application — main entry point."""
+
+from __future__ import annotations
 
 import sys
+
+from meanvc_gui import APP_DESCRIPTION, APP_NAME, APP_VERSION
+from PySide6.QtCore import Qt, Signal, QObject
+from PySide6.QtGui import QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
-    QMainWindow,
-    QWidget,
-    QVBoxLayout,
+    QFrame,
     QHBoxLayout,
-    QListWidget,
     QLabel,
-    QSplitter,
+    QMainWindow,
+    QMessageBox,
+    QSizePolicy,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
 )
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QIcon, QPixmap
 
-from meanvc_gui.components.theme import COLORS, get_dark_palette, get_nav_style
+from meanvc_gui.components.theme import COLORS, get_dark_palette, get_nav_style, get_stylesheet
+from meanvc_gui.core.device import get_current_device
 from meanvc_gui.pages.library import LibraryPage
 from meanvc_gui.pages.realtime import RealtimePage
 from meanvc_gui.pages.offline import OfflinePage
@@ -22,211 +29,276 @@ from meanvc_gui.pages.analysis import AnalysisPage
 from meanvc_gui.pages.settings import SettingsPage
 
 
-class MeanVCWindow(QMainWindow):
-    """Main application window."""
+_APP_VERSION = "0.1.0"
 
-    def __init__(self):
-        """Initialize main window."""
-        super().__init__()
+# ---------------------------------------------------------------------------
+# Cross-page event bus
+# ---------------------------------------------------------------------------
 
-        self.setWindowTitle("MeanVC")
-        self.setGeometry(100, 100, 1200, 800)
+class AppBus(QObject):
+    """Application-level signal bus for cross-page communication."""
+    profile_selected   = Signal(dict)    # emitted by Library → consumed by Offline, Realtime
+    analysis_requested = Signal(str)     # emitted by Offline (output_path) → Analysis
+    navigate_to        = Signal(int)     # navigate to page index
 
-        # Apply dark theme
-        self.setPalette(get_dark_palette())
-        self.setStyleSheet(self._get_stylesheet())
+bus = AppBus()
 
-        # Current active profile for conversion
-        self.current_profile = None
 
-        # Setup UI
-        self._setup_ui()
+# ---------------------------------------------------------------------------
+# Sidebar navigation item
+# ---------------------------------------------------------------------------
 
-        # Show first page
-        self._on_nav_change(0)
+_NAV_ITEMS = [
+    ("📚", "Library"),
+    ("🎙", "Realtime"),
+    ("🔄", "Offline"),
+    ("📊", "Analysis"),
+    ("⚙", "Settings"),
+]
 
-    def _get_stylesheet(self):
-        """Get application stylesheet."""
-        return f"""
-        QMainWindow {{
-            background-color: {COLORS["background"]};
-        }}
-        QWidget {{
-            color: {COLORS["text"]};
-        }}
-        QGroupBox {{
-            border: 1px solid {COLORS["border"]};
-            border-radius: 8px;
-            margin-top: 12px;
-            padding-top: 12px;
-            font-weight: bold;
-        }}
-        QGroupBox::title {{
-            subcontrol-origin: margin;
-            subcontrol-position: top left;
-            padding: 0 5px;
-            color: {COLORS["text_secondary"]};
-        }}
-        QLabel {{
-            color: {COLORS["text"]};
-        }}
-        QLineEdit {{
-            background-color: {COLORS["surface"]};
-            border: 1px solid {COLORS["border"]};
-            border-radius: 4px;
-            padding: 6px;
-            color: {COLORS["text"]};
-        }}
-        QLineEdit:focus {{
-            border: 1px solid {COLORS["primary"]};
-        }}
-        QComboBox {{
-            background-color: {COLORS["surface"]};
-            border: 1px solid {COLORS["border"]};
-            border-radius: 4px;
-            padding: 6px;
-            color: {COLORS["text"]};
-        }}
-        QComboBox::drop-down {{
-            border: none;
-        }}
-        QComboBox QAbstractItemView {{
-            background-color: {COLORS["surface"]};
-            color: {COLORS["text"]};
-            selection-background-color: {COLORS["surface_variant"]};
-        }}
-        QSlider::groove:horizontal {{
-            background: {COLORS["surface_variant"]};
-            height: 4px;
-            border-radius: 2px;
-        }}
-        QSlider::handle:horizontal {{
-            background: {COLORS["primary"]};
-            width: 14px;
-            margin: -5px 0;
-            border-radius: 7px;
-        }}
-        QProgressBar {{
-            background-color: {COLORS["surface_variant"]};
-            border: none;
-            border-radius: 4px;
-            text-align: center;
-            color: {COLORS["text"]};
-        }}
-        QProgressBar::chunk {{
-            background-color: {COLORS["primary"]};
-            border-radius: 4px;
-        }}
-        QListWidget {{
-            background-color: {COLORS["surface"]};
-            border: 1px solid {COLORS["border"]};
-            border-radius: 4px;
-            color: {COLORS["text"]};
-        }}
-        QListWidget::item {{
-            padding: 8px;
-            border-radius: 4px;
-        }}
-        QListWidget::item:selected {{
-            background-color: {COLORS["primary_dark"]};
-            color: {COLORS["text"]};
-        }}
-        QTableWidget {{
-            background-color: {COLORS["surface"]};
-            border: 1px solid {COLORS["border"]};
-            border-radius: 4px;
-            color: {COLORS["text"]};
-        }}
-        QHeaderView::section {{
-            background-color: {COLORS["surface_variant"]};
-            color: {COLORS["text"]};
-            padding: 6px;
-            border: none;
-        }}
-        QPushButton {{
-            background-color: {COLORS["surface_variant"]};
-            color: {COLORS["text"]};
-            border: none;
-            padding: 8px 16px;
-            border-radius: 6px;
-        }}
-        QPushButton:hover {{
-            background-color: {COLORS["border"]};
-        }}
-        """
 
-    def _setup_ui(self):
-        """Setup the UI."""
-        # Central widget with splitter
-        central = QWidget()
-        self.setCentralWidget(central)
+class NavItem(QFrame):
+    clicked = Signal(int)
 
-        layout = QHBoxLayout(central)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+    def __init__(self, icon: str, label: str, index: int, parent=None):
+        super().__init__(parent)
+        self._index = index
+        self._selected = False
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedHeight(44)
 
-        # Navigation sidebar
-        self.nav_list = QListWidget()
-        self.nav_list.setMaximumWidth(180)
-        self.nav_list.addItems(
-            ["Library", "Realtime", "Offline", "Analysis", "Settings"]
+        row = QHBoxLayout(self)
+        row.setContentsMargins(16, 0, 16, 0)
+        row.setSpacing(12)
+
+        self._icon = QLabel(icon)
+        self._icon.setFixedWidth(20)
+        self._icon.setAlignment(Qt.AlignCenter)
+        self._icon.setStyleSheet("font-size: 16px; background: transparent;")
+        row.addWidget(self._icon)
+
+        self._label = QLabel(label)
+        self._label.setStyleSheet(
+            f"font-size: 13px; font-weight: 500; color: {COLORS['text_secondary']}; background: transparent;"
         )
-        self.nav_list.setCurrentRow(0)
-        self.nav_list.currentRowChanged.connect(self._on_nav_change)
-        self.nav_list.setStyleSheet(get_nav_style())
+        row.addWidget(self._label)
+        row.addStretch()
 
-        layout.addWidget(self.nav_list)
+        self._update_style()
+
+    def set_selected(self, selected: bool) -> None:
+        self._selected = selected
+        self._update_style()
+
+    def _update_style(self) -> None:
+        if self._selected:
+            self.setStyleSheet(f"""
+                QFrame {{
+                    background-color: {COLORS['nav_active_bg']};
+                    /* border-left: 2px solid {COLORS['primary']}; */
+                    border-radius: 0;
+                }}
+            """)
+            self._label.setStyleSheet(
+                f"font-size: 13px; font-weight: 600; color: {COLORS['primary']}; background: transparent;"
+            )
+        else:
+            self.setStyleSheet("QFrame { background: transparent; border: none; }")
+            self._label.setStyleSheet(
+                f"font-size: 13px; font-weight: 500; color: {COLORS['text_secondary']}; background: transparent;"
+            )
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        self.clicked.emit(self._index)
+        super().mousePressEvent(event)
+
+
+# ---------------------------------------------------------------------------
+# Main window
+# ---------------------------------------------------------------------------
+
+class MeanVCWindow(QMainWindow):
+    """Application main window."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowTitle(APP_NAME)
+        self.setMinimumSize(1100, 720)
+        self.resize(1280, 820)
+
+        self.setPalette(get_dark_palette())
+        self.setStyleSheet(get_stylesheet())
+
+        # Current profile — set by Library page
+        self.current_profile: dict | None = None
+
+        self._build_ui()
+        self._register_shortcuts()
+        self._navigate(0)
+
+        # Asset check after window is shown
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(500, self._check_assets_on_startup)
+
+    # ------------------------------------------------------------------
+    # UI construction
+    # ------------------------------------------------------------------
+
+    def _build_ui(self) -> None:
+        root = QWidget()
+        self.setCentralWidget(root)
+        root_layout = QHBoxLayout(root)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+
+        # --- Sidebar ---
+        sidebar = QFrame()
+        sidebar.setFixedWidth(200)
+        sidebar.setObjectName("Sidebar")
+        sidebar.setStyleSheet(f"""
+            #Sidebar {{
+                background-color: {COLORS['nav_bg']};
+                border-right: 1px solid {COLORS['border']};
+            }}
+        """)
+
+        sb_layout = QVBoxLayout(sidebar)
+        sb_layout.setContentsMargins(0, 0, 0, 0)
+        sb_layout.setSpacing(0)
+
+        # Logo / title
+        logo_area = QWidget()
+        logo_area.setFixedHeight(60)
+        logo_layout = QHBoxLayout(logo_area)
+        logo_layout.setContentsMargins(20, 0, 12, 0)
+        logo_label = QLabel(APP_NAME)
+        logo_label.setStyleSheet(
+            f"font-size: 18px; font-weight: 700; color: {COLORS['primary']}; letter-spacing: -0.03em;"
+        )
+        logo_layout.addWidget(logo_label)
+        logo_layout.addStretch()
+        sb_layout.addWidget(logo_area)
 
         # Divider
-        divider = QWidget()
-        divider.setFixedWidth(1)
-        divider.setStyleSheet(f"background-color: {COLORS['border']};")
-        layout.addWidget(divider)
+        div = QFrame()
+        div.setFixedHeight(1)
+        div.setStyleSheet(f"background: {COLORS['border']};")
+        sb_layout.addWidget(div)
+        sb_layout.addSpacing(8)
 
-        # Content area
-        self.content_stack = QWidget()
-        self.content_layout = QVBoxLayout(self.content_stack)
-        self.content_layout.setContentsMargins(0, 0, 0, 0)
+        # Nav items
+        self._nav_items: list[NavItem] = []
+        for i, (icon, label) in enumerate(_NAV_ITEMS):
+            item = NavItem(icon, label, i)
+            item.clicked.connect(self._navigate)
+            sb_layout.addWidget(item)
+            self._nav_items.append(item)
 
-        layout.addWidget(self.content_stack, 1)
+        sb_layout.addStretch()
 
-        # Initialize pages
-        self.pages = [
+        # Bottom: device badge + version
+        bottom = QWidget()
+        bottom.setFixedHeight(64)
+        bot_layout = QVBoxLayout(bottom)
+        bot_layout.setContentsMargins(20, 8, 20, 8)
+        bot_layout.setSpacing(2)
+
+        device = get_current_device().upper()
+        device_badge = QLabel(f"● {device}")
+        badge_color = (
+            COLORS["success"] if device == "CUDA"
+            else COLORS["warning"] if device == "MPS"
+            else COLORS["text_muted"]
+        )
+        device_badge.setStyleSheet(
+            f"font-size: 11px; font-weight: 600; color: {badge_color}; background: transparent;"
+        )
+        bot_layout.addWidget(device_badge)
+
+        version_lbl = QLabel(f"v{_APP_VERSION}")
+        version_lbl.setStyleSheet(
+            f"font-size: 10px; color: {COLORS['text_muted']}; background: transparent;"
+        )
+        bot_layout.addWidget(version_lbl)
+
+        sb_layout.addWidget(bottom)
+        root_layout.addWidget(sidebar)
+
+        # --- Content area ---
+        self._stack = QStackedWidget()
+        self._stack.setStyleSheet("QStackedWidget { background: transparent; }")
+        root_layout.addWidget(self._stack, 1)
+
+        # Initialise pages
+        self._pages = [
             LibraryPage(self),
             RealtimePage(self),
             OfflinePage(self),
             AnalysisPage(self),
             SettingsPage(self),
         ]
+        for page in self._pages:
+            self._stack.addWidget(page)
 
-        # Hide all pages initially
-        for page in self.pages:
-            page.hide()
+        # Wire cross-page bus
+        bus.navigate_to.connect(self._navigate)
 
-    def _on_nav_change(self, index):
-        """Handle navigation change.
+    def _register_shortcuts(self) -> None:
+        QShortcut(QKeySequence("Ctrl+Q"), self).activated.connect(self.close)
+        for i in range(5):
+            QShortcut(QKeySequence(f"Ctrl+{i+1}"), self).activated.connect(
+                lambda checked=False, idx=i: self._navigate(idx)
+            )
 
-        Args:
-            index: Selected page index
-        """
-        # Hide all pages
-        for page in self.pages:
-            page.hide()
+    # ------------------------------------------------------------------
+    # Navigation
+    # ------------------------------------------------------------------
 
-        # Show selected page
-        if 0 <= index < len(self.pages):
-            self.pages[index].show()
-            self.content_layout.addWidget(self.pages[index], 1)
+    def _navigate(self, index: int) -> None:
+        if not (0 <= index < len(self._pages)):
+            return
+        self._stack.setCurrentIndex(index)
+        for i, item in enumerate(self._nav_items):
+            item.set_selected(i == index)
+
+    # ------------------------------------------------------------------
+    # Startup asset check
+    # ------------------------------------------------------------------
+
+    def _check_assets_on_startup(self) -> None:
+        try:
+            from meanvc_gui.core.engine import check_assets
+            results = check_assets()
+            missing = [name for name, info in results.items() if not info["exists"]]
+            if missing:
+                msg = QMessageBox(self)
+                msg.setWindowTitle(f"{APP_NAME} — Missing Assets")
+                msg.setIcon(QMessageBox.Warning)
+                msg.setText(
+                    f"{len(missing)} required model file(s) missing.\n"
+                    "The app will open but conversion will not work until assets are downloaded."
+                )
+                msg.setInformativeText("Click 'Open Settings' to download missing assets.")
+                open_btn = msg.addButton("Open Settings", QMessageBox.AcceptRole)
+                msg.addButton("Dismiss", QMessageBox.RejectRole)
+                msg.exec()
+                if msg.clickedButton() == open_btn:
+                    self._navigate(4)  # Settings page
+        except Exception:
+            pass  # engine import may fail if deps not met — silent here
 
 
-def main():
-    """Main entry point."""
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def main() -> None:
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    app.setFont(QFont("-apple-system", 13))
 
     window = MeanVCWindow()
     window.show()
-
     sys.exit(app.exec())
 
 

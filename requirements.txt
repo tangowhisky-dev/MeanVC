@@ -2,6 +2,7 @@
 torch 
 torchvision 
 torchaudio
+torchcodec  # required on aarch64 (Apple Silicon / ARM Linux) for torchaudio.load
 librosa
 einops
 x-transformers

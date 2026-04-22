@@ -120,7 +120,8 @@ def _gdrive_download(file_id: str, dest: Path, desc: str = "") -> None:
     url = f"https://drive.google.com/uc?id={file_id}"
     label = desc or dest.name
     print(f"  ↓ Downloading {label} from Google Drive …")
-    gdown.download(url, str(dest), quiet=False, fuzzy=True)
+    gdown.download(url, str(dest), quiet=False)
+    # gdown.download(url, str(dest), quiet=False, fuzzy=True)
     if dest.exists():
         print(f"  ✓ {dest}")
     else:

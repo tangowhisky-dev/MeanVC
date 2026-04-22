@@ -1,7 +1,7 @@
 # Codebase Map
 
-Generated: 2026-04-15T21:57:59Z | Files: 76 | Described: 0/76
-<!-- gsd:codebase-meta {"generatedAt":"2026-04-15T21:57:59Z","fingerprint":"d1dc61f76766892e0cdbbf10ffaa02c8fa5f0792","fileCount":76,"truncated":false} -->
+Generated: 2026-04-22T12:27:28Z | Files: 101 | Described: 0/101
+<!-- gsd:codebase-meta {"generatedAt":"2026-04-22T12:27:28Z","fingerprint":"7117a5bceed409db25a6346dbd1305a030ab2119","fileCount":101,"truncated":false} -->
 
 ### (root)/
 - `.DS_Store`
@@ -10,10 +10,45 @@ Generated: 2026-04-15T21:57:59Z | Files: 76 | Described: 0/76
 - `default_config.yaml`
 - `defaults.ini`
 - `download_ckpt.py`
+- `FLET_IMPLEMENTATION_PLAN.md`
 - `LICENSE`
-- `MPS_COMPATIBILITY_ANALYSIS.md`
+- `MODEL_SIZE_ANALYSIS.md`
 - `README.md`
 - `requirements.txt`
+- `SPEAKER_MODEL_ANALYSIS.md`
+- `TRAINING_GUIDE.md`
+
+### meanvc_gui/
+- `meanvc_gui/__init__.py`
+- `meanvc_gui/DESIGN.md`
+- `meanvc_gui/main_enhanced.py`
+- `meanvc_gui/main_modern.py`
+- `meanvc_gui/main.py`
+- `meanvc_gui/PROFILE_DESIGN.md`
+- `meanvc_gui/requirements.txt`
+
+### meanvc_gui/components/
+- `meanvc_gui/components/enhanced_theme.py`
+- `meanvc_gui/components/modern_theme.py`
+- `meanvc_gui/components/theme.py`
+- `meanvc_gui/components/waveform.py`
+
+### meanvc_gui/core/
+- `meanvc_gui/core/device.py`
+- `meanvc_gui/core/engine.py`
+- `meanvc_gui/core/profile_db.py`
+- `meanvc_gui/core/profile_manager.py`
+
+### meanvc_gui/data/
+- `meanvc_gui/data/meanvc.db`
+
+### meanvc_gui/pages/
+- `meanvc_gui/pages/analysis.py`
+- `meanvc_gui/pages/enhanced_library.py`
+- `meanvc_gui/pages/library.py`
+- `meanvc_gui/pages/offline.py`
+- `meanvc_gui/pages/realtime.py`
+- `meanvc_gui/pages/settings.py`
 
 ### meanvc_out/
 - `meanvc_out/anchor_converted.wav`
