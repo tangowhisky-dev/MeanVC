@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QSlider,
     QVBoxLayout,
@@ -191,6 +192,27 @@ class RealtimePage(QWidget):
         self._chart_view.setStyleSheet(f"border-radius: 8px; background: {COLORS['surface']};")
         root.addWidget(self._chart_view)
 
+        # Log area — selectable, copy-pasteable
+        log_header = QHBoxLayout()
+        log_header.setSpacing(8)
+        log_header.addWidget(QLabel("Logs:"))
+        self._clear_log_btn = QPushButton("Clear")
+        self._clear_log_btn.setMaximumWidth(60)
+        self._clear_log_btn.clicked.connect(lambda: self._log_edit.clear())
+        log_header.addWidget(self._clear_log_btn)
+        log_header.addStretch()
+        root.addLayout(log_header)
+
+        self._log_edit = QPlainTextEdit()
+        self._log_edit.setReadOnly(True)
+        self._log_edit.setMinimumHeight(40)
+        self._log_edit.setMaximumHeight(120)
+        self._log_edit.setStyleSheet(
+            "font-size: 11px; font-family: monospace; background: transparent; color: #aaa; border: none; padding: 4px;"
+        )
+        self._log_edit.setPlaceholderText("Status logs will appear here…")
+        root.addWidget(self._log_edit)
+
         root.addStretch()
 
         self._save_out_path: str | None = None
@@ -288,8 +310,10 @@ class RealtimePage(QWidget):
         self._wave_timer.start()
         self._status_label.setText("Starting…")
         self._rtf_history.clear()
+        self._log_edit.appendPlainText("[INFO] Starting realtime conversion…")
 
     def _stop(self) -> None:
+        self._log_edit.appendPlainText("[INFO] Stopping…")
         if self._runner:
             self._runner.stop()
         self._stop_btn.setEnabled(False)
@@ -302,6 +326,7 @@ class RealtimePage(QWidget):
         self._wave_timer.stop()
         self._status_label.setText("Stopped.")
         self._rtf_label.setText("")
+        self._log_edit.appendPlainText("[INFO] Realtime conversion stopped.")
 
     # ------------------------------------------------------------------
     # Signals from runner
@@ -316,12 +341,22 @@ class RealtimePage(QWidget):
 
     def _on_status(self, msg: str) -> None:
         self._status_label.setText(msg)
+        from datetime import datetime
+        ts = datetime.now().strftime("%H:%M:%S")
+        self._log_edit.appendPlainText(f"[{ts}] {msg}")
+        scrollbar = self._log_edit.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
 
     def _on_error(self, msg: str) -> None:
         self._wave_timer.stop()
         self._start_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
         self._status_label.setText("Error")
+        from datetime import datetime
+        ts = datetime.now().strftime("%H:%M:%S")
+        self._log_edit.appendPlainText(f"[{ts}] ERROR: {msg}")
+        scrollbar = self._log_edit.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
         QMessageBox.critical(self, "Realtime Error", msg)
 
     # ------------------------------------------------------------------

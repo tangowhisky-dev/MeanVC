@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QProgressBar,
+    QPlainTextEdit,
     QPushButton,
     QSlider,
     QVBoxLayout,
@@ -205,6 +206,27 @@ class OfflinePage(QWidget):
         self._progress_bar.setValue(0)
         self._progress_bar.setFixedHeight(6)
         root.addWidget(self._progress_bar)
+
+        # Log area — selectable, copy-pasteable
+        log_header = QHBoxLayout()
+        log_header.setSpacing(8)
+        log_header.addWidget(QLabel("Logs:"))
+        self._clear_log_btn = QPushButton("Clear")
+        self._clear_log_btn.setMaximumWidth(60)
+        self._clear_log_btn.clicked.connect(lambda: self._log_edit.clear())
+        log_header.addWidget(self._clear_log_btn)
+        log_header.addStretch()
+        root.addLayout(log_header)
+
+        self._log_edit = QPlainTextEdit()
+        self._log_edit.setReadOnly(True)
+        self._log_edit.setMinimumHeight(60)
+        self._log_edit.setMaximumHeight(200)
+        self._log_edit.setStyleSheet(
+            "font-size: 12px; font-family: monospace; background: transparent; color: #aaa; border: none; padding: 4px;"
+        )
+        self._log_edit.setPlaceholderText("Conversion logs will appear here…")
+        root.addWidget(self._log_edit)
         self._phase_label = SecondaryLabel("")
         root.addWidget(self._phase_label)
 
@@ -323,6 +345,7 @@ class OfflinePage(QWidget):
         self._cancel_btn.setEnabled(True)
         self._progress_bar.setValue(0)
         self._result_card.hide()
+        self._log_edit.appendPlainText("[INFO] Starting conversion…")
 
         self._worker = ConversionWorker(
             source_path = self.source_path,
@@ -344,7 +367,13 @@ class OfflinePage(QWidget):
 
     def _on_progress(self, pct: int, msg: str) -> None:
         self._progress_bar.setValue(pct)
+        from datetime import datetime
+        ts = datetime.now().strftime("%H:%M:%S")
+        self._log_edit.appendPlainText(f"[{ts}] {pct}% — {msg}")
         self._phase_label.setText(msg)
+        # Auto-scroll to bottom
+        scrollbar = self._log_edit.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
 
     def _on_finished(self, output_path: str) -> None:
         self.output_path = output_path
@@ -354,6 +383,9 @@ class OfflinePage(QWidget):
         self._phase_label.setText("Complete ✓")
         self._result_path_label.setText(output_path)
         self._result_card.show()
+        from datetime import datetime
+        ts = datetime.now().strftime("%H:%M:%S")
+        self._log_edit.appendPlainText(f"[{ts}] 100% — Complete ✓")
         # Emit to analysis page
         try:
             from meanvc_gui.main import bus
@@ -365,6 +397,9 @@ class OfflinePage(QWidget):
         self._convert_btn.setEnabled(True)
         self._cancel_btn.setEnabled(False)
         self._phase_label.setText(f"Error: {msg}")
+        from datetime import datetime
+        ts = datetime.now().strftime("%H:%M:%S")
+        self._log_edit.appendPlainText(f"[{ts}] ERROR: {msg}")
 
     # ------------------------------------------------------------------
     # Playback

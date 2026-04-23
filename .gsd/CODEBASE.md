@@ -1,7 +1,7 @@
 # Codebase Map
 
-Generated: 2026-04-22T12:27:28Z | Files: 101 | Described: 0/101
-<!-- gsd:codebase-meta {"generatedAt":"2026-04-22T12:27:28Z","fingerprint":"7117a5bceed409db25a6346dbd1305a030ab2119","fileCount":101,"truncated":false} -->
+Generated: 2026-04-23T04:58:38Z | Files: 93 | Described: 0/93
+<!-- gsd:codebase-meta {"generatedAt":"2026-04-23T04:58:38Z","fingerprint":"32f4e7b80c5fb103fce8841fa6e1bc05d7129c44","fileCount":93,"truncated":false} -->
 
 ### (root)/
 - `.DS_Store`
@@ -10,7 +10,6 @@ Generated: 2026-04-22T12:27:28Z | Files: 101 | Described: 0/101
 - `default_config.yaml`
 - `defaults.ini`
 - `download_ckpt.py`
-- `FLET_IMPLEMENTATION_PLAN.md`
 - `LICENSE`
 - `MODEL_SIZE_ANALYSIS.md`
 - `README.md`
@@ -20,16 +19,10 @@ Generated: 2026-04-22T12:27:28Z | Files: 101 | Described: 0/101
 
 ### meanvc_gui/
 - `meanvc_gui/__init__.py`
-- `meanvc_gui/DESIGN.md`
-- `meanvc_gui/main_enhanced.py`
-- `meanvc_gui/main_modern.py`
 - `meanvc_gui/main.py`
-- `meanvc_gui/PROFILE_DESIGN.md`
 - `meanvc_gui/requirements.txt`
 
 ### meanvc_gui/components/
-- `meanvc_gui/components/enhanced_theme.py`
-- `meanvc_gui/components/modern_theme.py`
 - `meanvc_gui/components/theme.py`
 - `meanvc_gui/components/waveform.py`
 
@@ -38,13 +31,10 @@ Generated: 2026-04-22T12:27:28Z | Files: 101 | Described: 0/101
 - `meanvc_gui/core/engine.py`
 - `meanvc_gui/core/profile_db.py`
 - `meanvc_gui/core/profile_manager.py`
-
-### meanvc_gui/data/
-- `meanvc_gui/data/meanvc.db`
+- `meanvc_gui/core/vc_runner.py`
 
 ### meanvc_gui/pages/
 - `meanvc_gui/pages/analysis.py`
-- `meanvc_gui/pages/enhanced_library.py`
 - `meanvc_gui/pages/library.py`
 - `meanvc_gui/pages/offline.py`
 - `meanvc_gui/pages/realtime.py`

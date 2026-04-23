@@ -1,1 +1,2 @@
 {"id":"8a461095-ee39-4da1-a463-924d73fd63bc","ts":"2026-04-15T19:12:32.815Z","severity":"warning","message":"[bootstrap] ensureDbOpen failed — no .gsd directory found","source":"workflow-logger","read":false}
+{"id":"394c87bc-58fc-4f2d-b470-150c780b152a","ts":"2026-04-23T04:56:36.501Z","severity":"warning","message":"Web search: Set BRAVE_API_KEY or use an Anthropic model for built-in search","source":"notify","read":false}
